@@ -1,1 +1,61 @@
+name: Update NG Swing GDD Master
 
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Start date to pull, format YYYY-MM-DD"
+        required: true
+        default: "2026-06-01"
+      end_date:
+        description: "End date to pull, format YYYY-MM-DD"
+        required: true
+        default: "2026-06-30"
+
+jobs:
+  update-master:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Confirm input files
+        run: |
+          echo "Repository files:"
+          find . -maxdepth 3 -type f
+          echo ""
+          echo "Checking for daily file..."
+          test -f input/icecleared_latest.xlsx
+
+      - name: Update master workbook
+        run: |
+          python src/update_ng_swing_master.py \
+            --daily input/icecleared_latest.xlsx \
+            --master master/master_ng_swing_gdd.xlsx \
+            --output master/master_ng_swing_gdd.xlsx \
+            --start "${{ github.event.inputs.start_date }}" \
+            --end "${{ github.event.inputs.end_date }}"
+
+      - name: Commit updated master file
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+
+          git add master/master_ng_swing_gdd.xlsx
+
+          git commit -m "Update NG Swing GDD master prices" || echo "No changes to commit"
+          git push

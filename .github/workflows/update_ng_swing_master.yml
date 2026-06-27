@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: "Start date to pull, format YYYY-MM-DD"
+        description: "Start Column D / Strip date to pull, format YYYY-MM-DD"
         required: true
         default: "2026-06-01"
       end_date:
-        description: "End date to pull, format YYYY-MM-DD"
+        description: "End Column D / Strip date to pull, format YYYY-MM-DD"
         required: true
-        default: "2026-06-30"
+        default: "2026-06-01"
 
 jobs:
   update-master:
@@ -36,7 +36,7 @@ jobs:
       - name: Confirm input files
         run: |
           echo "Repository files:"
-          find . -maxdepth 3 -type f
+          find . -maxdepth 4 -type f
           echo ""
           echo "Checking for daily file..."
           test -f input/icecleared_latest.xlsx
@@ -48,14 +48,27 @@ jobs:
             --master master/master_ng_swing_gdd.xlsx \
             --output master/master_ng_swing_gdd.xlsx \
             --start "${{ github.event.inputs.start_date }}" \
-            --end "${{ github.event.inputs.end_date }}"
+            --end "${{ github.event.inputs.end_date }}" \
+            --audit-dir audit
 
-      - name: Commit updated master file
+      - name: Upload audit artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ng-swing-gdd-audit
+          path: |
+            audit/*.csv
+            master/master_ng_swing_gdd.xlsx
+          if-no-files-found: ignore
+
+      - name: Commit updated files
+        if: success()
         run: |
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
           git add master/master_ng_swing_gdd.xlsx
+          git add audit/last_extracted_ng_swing_gdd.csv
 
           git commit -m "Update NG Swing GDD master prices" || echo "No changes to commit"
           git push

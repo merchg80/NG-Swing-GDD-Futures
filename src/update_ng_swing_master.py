@@ -4,22 +4,24 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 
 PRODUCT_FILTER = "NG Swing GDD Futures"
 
-# Daily ICE file expected columns by position:
+# ICE worksheet expected columns:
+# A = TRADE DATE
 # B = HUB
 # C = PRODUCT
-# D = STRIP / DATE
+# D = STRIP
 # H = SETTLEMENT PRICE
-HUB_COL_INDEX = 1          # Column B
-PRODUCT_COL_INDEX = 2      # Column C
-STRIP_COL_INDEX = 3        # Column D
-PRICE_COL_INDEX = 7        # Column H
+TRADE_DATE_COL_INDEX = 0
+HUB_COL_INDEX = 1
+PRODUCT_COL_INDEX = 2
+STRIP_COL_INDEX = 3
+PRICE_COL_INDEX = 7
 
 
 def normalize_date(value) -> Optional[pd.Timestamp]:
@@ -38,10 +40,9 @@ def normalize_date(value) -> Optional[pd.Timestamp]:
     return pd.Timestamp(parsed).normalize()
 
 
-def normalize_header_date(value) -> Optional[str]:
+def normalize_date_header(value) -> Optional[str]:
     """
-    Normalizes a master-file date header into YYYY-MM-DD.
-    Handles true Excel dates, pandas timestamps, and date-like strings.
+    Normalizes a date value into YYYY-MM-DD.
     """
     parsed = normalize_date(value)
 
@@ -54,13 +55,13 @@ def normalize_header_date(value) -> Optional[str]:
     return parsed.strftime("%Y-%m-%d")
 
 
-def read_daily_file(daily_file: str) -> pd.DataFrame:
+def read_daily_file(daily_file: str, date_field: str) -> pd.DataFrame:
     """
-    Reads the daily ICE download by fixed column positions:
-    B = Hub
-    C = Product
-    D = Strip / Date
-    H = Settlement Price
+    Reads the ICE worksheet.
+
+    date_field options:
+    - strip: use Column D / STRIP
+    - trade_date: use Column A / TRADE DATE
     """
 
     if not os.path.exists(daily_file):
@@ -74,29 +75,40 @@ def read_daily_file(daily_file: str) -> pd.DataFrame:
             f"Expected at least 8 columns through Column H. Found {raw.shape[1]} columns."
         )
 
+    if date_field == "trade_date":
+        selected_date_col = TRADE_DATE_COL_INDEX
+        selected_date_label = "TRADE DATE / Column A"
+    else:
+        selected_date_col = STRIP_COL_INDEX
+        selected_date_label = "STRIP / Column D"
+
     df = pd.DataFrame({
+        "SelectedDateRaw": raw.iloc[:, selected_date_col],
+        "TradeDateRaw": raw.iloc[:, TRADE_DATE_COL_INDEX],
+        "StripRaw": raw.iloc[:, STRIP_COL_INDEX],
         "Hub": raw.iloc[:, HUB_COL_INDEX],
         "Product": raw.iloc[:, PRODUCT_COL_INDEX],
-        "StripRaw": raw.iloc[:, STRIP_COL_INDEX],
         "SettlementPrice": raw.iloc[:, PRICE_COL_INDEX],
     })
 
     df["Hub"] = df["Hub"].astype(str).str.strip()
     df["Product"] = df["Product"].astype(str).str.strip()
-    df["StripDate"] = df["StripRaw"].apply(normalize_date)
+    df["SelectedDate"] = df["SelectedDateRaw"].apply(normalize_date)
 
-    df["DateHeader"] = df["StripDate"].apply(
+    df["DateHeader"] = df["SelectedDate"].apply(
         lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else None
     )
 
     df["SettlementPrice"] = pd.to_numeric(df["SettlementPrice"], errors="coerce")
+
+    print(f"Using date field: {selected_date_label}")
 
     return df
 
 
 def print_diagnostics(df: pd.DataFrame):
     """
-    Prints useful diagnostics into the GitHub Actions log.
+    Prints useful diagnostics to the GitHub Actions log.
     """
 
     product_matches = df[
@@ -109,8 +121,9 @@ def print_diagnostics(df: pd.DataFrame):
     print(f"Rows where Product contains '{PRODUCT_FILTER}': {len(product_matches)}")
 
     if product_matches.empty:
+        print("")
         print("No matching product rows found.")
-        print("Sample Product values from Column C:")
+        print("Sample Product values:")
         print(df["Product"].dropna().drop_duplicates().head(25).to_string(index=False))
         print("=================================")
         return
@@ -120,13 +133,23 @@ def print_diagnostics(df: pd.DataFrame):
     )
 
     print("")
-    print("Matching Column D / Strip dates found:")
-    for d in available_dates:
+    print("Matching selected dates found:")
+    for d in available_dates[:100]:
         print(f" - {d}")
+
+    if len(available_dates) > 100:
+        print(f"... plus {len(available_dates) - 100} more dates")
 
     print("")
     print("Sample matching rows:")
-    sample_cols = ["Hub", "Product", "StripRaw", "DateHeader", "SettlementPrice"]
+    sample_cols = [
+        "Hub",
+        "Product",
+        "TradeDateRaw",
+        "StripRaw",
+        "DateHeader",
+        "SettlementPrice",
+    ]
     print(product_matches[sample_cols].head(25).to_string(index=False))
     print("=================================")
     print("")
@@ -140,7 +163,7 @@ def filter_daily_prices(
     """
     Filters to:
     - Product contains NG Swing GDD Futures
-    - Column D / Strip date is within the requested date range
+    - selected date is within requested range
     - Hub is valid
     - Settlement price is valid
     """
@@ -162,9 +185,9 @@ def filter_daily_prices(
     )
 
     filtered = product_matches[
-        product_matches["StripDate"].notna()
-        & (product_matches["StripDate"] >= start)
-        & (product_matches["StripDate"] <= end)
+        product_matches["SelectedDate"].notna()
+        & (product_matches["SelectedDate"] >= start)
+        & (product_matches["SelectedDate"] <= end)
         & product_matches["Hub"].notna()
         & product_matches["SettlementPrice"].notna()
     ].copy()
@@ -172,15 +195,15 @@ def filter_daily_prices(
     if filtered.empty:
         raise ValueError(
             f"No rows found for Product containing '{PRODUCT_FILTER}' "
-            f"between {start_date} and {end_date} using Column D / Strip date.\n\n"
-            f"Available matching Column D dates in this file are:\n"
+            f"between {start_date} and {end_date}.\n\n"
+            f"Available matching dates in this file are:\n"
             f"{available_dates}"
         )
 
-    filtered = filtered[["Hub", "DateHeader", "SettlementPrice"]]
+    filtered = filtered[["DateHeader", "Hub", "SettlementPrice"]]
 
-    # If duplicate hub/date records exist, keep the last one from the daily file.
-    filtered = filtered.drop_duplicates(subset=["Hub", "DateHeader"], keep="last")
+    # If duplicate date/hub records exist, keep the last one from the ICE file.
+    filtered = filtered.drop_duplicates(subset=["DateHeader", "Hub"], keep="last")
 
     return filtered
 
@@ -189,6 +212,12 @@ def create_or_load_master(master_file: str):
     """
     Creates a blank master workbook if one does not exist.
     Otherwise loads the existing master workbook.
+
+    Correct layout:
+    A1 = Date
+    Row 1 = Hubs
+    Column A = Dates
+    Body = Settlement prices
     """
 
     master_path = Path(master_file)
@@ -198,178 +227,213 @@ def create_or_load_master(master_file: str):
         wb = load_workbook(master_path)
         ws = wb.active
         ws.title = "NG Swing GDD"
-    else:
-        from openpyxl import Workbook
 
+        a1 = ws.cell(row=1, column=1).value
+
+        if a1 is None or str(a1).strip() == "":
+            ws.cell(row=1, column=1).value = "Date"
+
+        elif str(a1).strip().lower() == "hub":
+            raise ValueError(
+                "The existing master file appears to use the OLD layout with Hub in A1. "
+                "Please replace master/master_ng_swing_gdd.xlsx with a blank workbook "
+                "where A1 = Date."
+            )
+
+        elif str(a1).strip().lower() != "date":
+            raise ValueError(
+                f"The existing master file has A1 = '{a1}'. "
+                "Expected A1 = Date."
+            )
+
+    else:
         wb = Workbook()
         ws = wb.active
         ws.title = "NG Swing GDD"
-        ws.cell(row=1, column=1).value = "Hub"
+        ws.cell(row=1, column=1).value = "Date"
 
     return wb, ws
 
 
-def get_existing_headers(ws):
+def get_existing_dates(ws):
     """
-    Reads existing date headers from Row 1 and normalizes them to YYYY-MM-DD.
-    This prevents Excel date headers from being missed because they appear as datetime objects.
+    Reads existing dates from Column A.
+    Returns:
+    {
+        "2026-06-01": 2,
+        "2026-06-02": 3
+    }
     """
 
-    headers = {}
+    dates = {}
 
-    for col in range(2, ws.max_column + 1):
-        raw_value = ws.cell(row=1, column=col).value
-        normalized = normalize_header_date(raw_value)
+    for row in range(2, ws.max_row + 1):
+        raw_value = ws.cell(row=row, column=1).value
+        normalized = normalize_date_header(raw_value)
 
         if normalized:
-            headers[normalized] = col
-            ws.cell(row=1, column=col).value = normalized
+            dates[normalized] = row
+            ws.cell(row=row, column=1).value = normalized
 
-    return headers
+    return dates
 
 
 def get_existing_hubs(ws):
     """
-    Reads existing hubs from Column A.
+    Reads existing hubs from Row 1.
+    Returns:
+    {
+        "ANR-SE": 2,
+        "ANR-SW": 3
+    }
     """
 
     hubs = {}
 
-    for row in range(2, ws.max_row + 1):
-        value = ws.cell(row=row, column=1).value
+    for col in range(2, ws.max_column + 1):
+        value = ws.cell(row=1, column=col).value
 
         if value is not None and str(value).strip() != "":
-            hubs[str(value).strip()] = row
+            hubs[str(value).strip()] = col
 
     return hubs
 
 
-def ensure_date_columns(ws, date_headers):
+def ensure_date_rows(ws, date_headers):
     """
-    Adds missing date headers across Row 1.
-    """
-
-    existing_headers = get_existing_headers(ws)
-    next_col = ws.max_column + 1 if ws.max_column >= 1 else 2
-
-    for date_header in sorted(date_headers):
-        if date_header not in existing_headers:
-            ws.cell(row=1, column=next_col).value = date_header
-            existing_headers[date_header] = next_col
-            next_col += 1
-
-    return existing_headers
-
-
-def ensure_hub_rows(ws, hub_names):
-    """
-    Adds missing hubs down Column A.
+    Adds missing dates down Column A.
     """
 
-    existing_hubs = get_existing_hubs(ws)
+    existing_dates = get_existing_dates(ws)
     next_row = ws.max_row + 1 if ws.max_row >= 1 else 2
 
     if ws.cell(row=1, column=1).value is None:
-        ws.cell(row=1, column=1).value = "Hub"
+        ws.cell(row=1, column=1).value = "Date"
+
+    for date_header in sorted(date_headers):
+        if date_header not in existing_dates:
+            ws.cell(row=next_row, column=1).value = date_header
+            existing_dates[date_header] = next_row
+            next_row += 1
+
+    return existing_dates
+
+
+def ensure_hub_columns(ws, hub_names):
+    """
+    Adds missing hubs across Row 1.
+    """
+
+    existing_hubs = get_existing_hubs(ws)
+    next_col = ws.max_column + 1 if ws.max_column >= 1 else 2
 
     for hub in sorted(hub_names):
         if hub not in existing_hubs:
-            ws.cell(row=next_row, column=1).value = hub
-            existing_hubs[hub] = next_row
-            next_row += 1
+            ws.cell(row=1, column=next_col).value = hub
+            existing_hubs[hub] = next_col
+            next_col += 1
 
     return existing_hubs
 
 
 def update_master(ws, prices: pd.DataFrame):
     """
-    Writes prices into the matrix:
-    - Hubs down Column A
-    - Dates across Row 1
+    Writes prices into the corrected matrix:
+    - Dates down Column A
+    - Hubs across Row 1
     - Settlement prices in the body
     """
 
     date_headers = sorted(prices["DateHeader"].dropna().unique())
     hub_names = sorted(prices["Hub"].dropna().unique())
 
-    header_map = ensure_date_columns(ws, date_headers)
-    hub_map = ensure_hub_rows(ws, hub_names)
+    date_map = ensure_date_rows(ws, date_headers)
+    hub_map = ensure_hub_columns(ws, hub_names)
+
+    cells_written = 0
 
     for _, row in prices.iterrows():
-        hub = row["Hub"]
         date_header = row["DateHeader"]
+        hub = row["Hub"]
         price = row["SettlementPrice"]
 
-        target_row = hub_map[hub]
-        target_col = header_map[date_header]
+        target_row = date_map[date_header]
+        target_col = hub_map[hub]
 
         ws.cell(row=target_row, column=target_col).value = float(price)
+        cells_written += 1
+
+    return cells_written
 
 
 def sort_master(ws):
     """
-    Sorts dates left-to-right and hubs top-to-bottom.
+    Sorts dates top-to-bottom and hubs left-to-right.
+    Rebuilds the matrix while preserving values.
     """
 
-    hubs = []
     dates = []
+    hubs = []
 
     for row in range(2, ws.max_row + 1):
-        hub = ws.cell(row=row, column=1).value
-        if hub is not None and str(hub).strip() != "":
-            hubs.append(str(hub).strip())
+        raw_date = ws.cell(row=row, column=1).value
+        normalized_date = normalize_date_header(raw_date)
 
-    for col in range(2, ws.max_column + 1):
-        raw_date = ws.cell(row=1, column=col).value
-        normalized_date = normalize_header_date(raw_date)
         if normalized_date:
             dates.append(normalized_date)
 
-    hubs = sorted(set(hubs))
+    for col in range(2, ws.max_column + 1):
+        hub = ws.cell(row=1, column=col).value
+
+        if hub is not None and str(hub).strip() != "":
+            hubs.append(str(hub).strip())
+
     dates = sorted(set(dates))
+    hubs = sorted(set(hubs))
 
     data = {}
 
     for row in range(2, ws.max_row + 1):
-        hub = ws.cell(row=row, column=1).value
-        if hub is None:
+        raw_date = ws.cell(row=row, column=1).value
+        date = normalize_date_header(raw_date)
+
+        if not date:
             continue
 
-        hub = str(hub).strip()
-
         for col in range(2, ws.max_column + 1):
-            raw_date = ws.cell(row=1, column=col).value
-            date = normalize_header_date(raw_date)
+            hub = ws.cell(row=1, column=col).value
 
-            if not date:
+            if hub is None:
                 continue
 
+            hub = str(hub).strip()
             value = ws.cell(row=row, column=col).value
 
             if value is not None:
-                data[(hub, date)] = value
+                data[(date, hub)] = value
 
     # Clear sheet
     for row in ws.iter_rows():
         for cell in row:
             cell.value = None
 
-    # Rebuild
-    ws.cell(row=1, column=1).value = "Hub"
+    # Rebuild headers
+    ws.cell(row=1, column=1).value = "Date"
 
-    for col_idx, date in enumerate(dates, start=2):
-        ws.cell(row=1, column=col_idx).value = date
+    for col_idx, hub in enumerate(hubs, start=2):
+        ws.cell(row=1, column=col_idx).value = hub
 
-    for row_idx, hub in enumerate(hubs, start=2):
-        ws.cell(row=row_idx, column=1).value = hub
+    # Rebuild dates and values
+    for row_idx, date in enumerate(dates, start=2):
+        ws.cell(row=row_idx, column=1).value = date
 
-        for col_idx, date in enumerate(dates, start=2):
-            ws.cell(row=row_idx, column=col_idx).value = data.get((hub, date))
+        for col_idx, hub in enumerate(hubs, start=2):
+            ws.cell(row=row_idx, column=col_idx).value = data.get((date, hub))
 
 
 def format_master(ws):
     """
-    Applies basic formatting.
+    Applies basic formatting to the master sheet.
     """
 
     header_fill = PatternFill("solid", fgColor="D9EAF7")
@@ -382,19 +446,22 @@ def format_master(ws):
 
     ws.freeze_panes = "B2"
 
+    # Header row
     for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
+    # Date column
     for row in range(2, max_row + 1):
-        hub_cell = ws.cell(row=row, column=1)
-        hub_cell.font = Font(bold=True)
-        hub_cell.fill = header_fill
-        hub_cell.alignment = Alignment(horizontal="left", vertical="center")
-        hub_cell.border = border
+        date_cell = ws.cell(row=row, column=1)
+        date_cell.font = Font(bold=True)
+        date_cell.fill = header_fill
+        date_cell.alignment = Alignment(horizontal="left", vertical="center")
+        date_cell.border = border
 
+    # Price matrix
     for row in range(2, max_row + 1):
         for col in range(2, max_col + 1):
             cell = ws.cell(row=row, column=col)
@@ -406,14 +473,48 @@ def format_master(ws):
         col_letter = get_column_letter(col)
 
         if col == 1:
-            ws.column_dimensions[col_letter].width = 24
+            ws.column_dimensions[col_letter].width = 14
         else:
-            ws.column_dimensions[col_letter].width = 13
+            ws.column_dimensions[col_letter].width = 16
 
     ws.row_dimensions[1].height = 22
 
     if max_row >= 1 and max_col >= 1:
         ws.auto_filter.ref = f"A1:{get_column_letter(max_col)}{max_row}"
+
+
+def verify_master_has_data(ws, prices: pd.DataFrame):
+    """
+    Verifies that every extracted date has at least one populated price in the master.
+    Fails the workflow if not.
+    """
+
+    requested_dates = sorted(prices["DateHeader"].dropna().unique())
+
+    date_rows = get_existing_dates(ws)
+    hub_cols = get_existing_hubs(ws)
+
+    for date_header in requested_dates:
+        if date_header not in date_rows:
+            raise ValueError(
+                f"Verification failed: Date {date_header} not found in master Column A."
+            )
+
+        row_num = date_rows[date_header]
+        populated = 0
+
+        for _, col_num in hub_cols.items():
+            value = ws.cell(row=row_num, column=col_num).value
+            if value is not None:
+                populated += 1
+
+        if populated == 0:
+            raise ValueError(
+                f"Verification failed: Date {date_header} exists in master, "
+                f"but no price cells were populated."
+            )
+
+        print(f"Verified {date_header}: {populated} populated hub prices in master.")
 
 
 def save_audit_files(prices: pd.DataFrame, output_dir: str):
@@ -476,6 +577,13 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--date-field",
+        default="strip",
+        choices=["strip", "trade_date"],
+        help="Which ICE date field to use: strip or trade_date. Default is strip.",
+    )
+
+    parser.add_argument(
         "--audit-dir",
         default="audit",
         help="Directory for audit output files.",
@@ -503,20 +611,21 @@ def main():
         raise ValueError("Start and end dates must be valid YYYY-MM-DD dates.") from exc
 
     print(f"Reading daily file: {args.daily}")
-    daily_df = read_daily_file(args.daily)
+    daily_df = read_daily_file(args.daily, args.date_field)
 
     print_diagnostics(daily_df)
 
     print(f"Filtering product containing: {PRODUCT_FILTER}")
-    print(f"Requested Column D / Strip date range: {start_date} through {end_date}")
+    print(f"Requested date range: {start_date} through {end_date}")
+    print(f"Date field used: {args.date_field}")
 
     prices = filter_daily_prices(daily_df, start_date, end_date)
 
     print("")
     print("========== EXTRACTED SUMMARY ==========")
     print(f"Rows extracted: {len(prices)}")
-    print(f"Hubs found: {prices['Hub'].nunique()}")
     print(f"Dates found: {prices['DateHeader'].nunique()}")
+    print(f"Hubs found: {prices['Hub'].nunique()}")
     print("Extracted dates:")
     for d in sorted(prices["DateHeader"].unique()):
         print(f" - {d}")
@@ -527,9 +636,12 @@ def main():
 
     wb, ws = create_or_load_master(args.master)
 
-    update_master(ws, prices)
+    cells_written = update_master(ws, prices)
+    print(f"Cells written to master before sort: {cells_written}")
+
     sort_master(ws)
     format_master(ws)
+    verify_master_has_data(ws, prices)
 
     save_master(wb, args.output)
 

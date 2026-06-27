@@ -19,6 +19,14 @@ on:
         options:
           - strip
           - trade_date
+      reset_master:
+        description: "Delete and recreate the master file before running?"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 jobs:
   update-master:
@@ -47,23 +55,21 @@ jobs:
 
           echo "Using input/icecleared_latest.xlsx"
 
-      - name: Confirm master folder
+      - name: Prepare master folder
         run: |
-          echo "Files in master folder:"
+          mkdir -p master
+          mkdir -p audit
+
+          echo "Master folder contents before run:"
           ls -la master || true
 
-          if [ ! -d master ]; then
-            echo "ERROR: master folder does not exist."
-            exit 1
+          if [ "${{ github.event.inputs.reset_master }}" = "true" ]; then
+            echo "Reset requested. Deleting existing v2 master file."
+            rm -f master/master_ng_swing_gdd_v2.xlsx
           fi
 
-          if [ ! -f master/master_ng_swing_gdd.xlsx ]; then
-            echo "ERROR: master/master_ng_swing_gdd.xlsx does not exist."
-            echo "Upload a blank master file with A1 = Date."
-            exit 1
-          fi
-
-          echo "Using master/master_ng_swing_gdd.xlsx"
+          echo "The workflow will use:"
+          echo "master/master_ng_swing_gdd_v2.xlsx"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -79,12 +85,28 @@ jobs:
         run: |
           python src/update_ng_swing_master.py \
             --daily input/icecleared_latest.xlsx \
-            --master master/master_ng_swing_gdd.xlsx \
-            --output master/master_ng_swing_gdd.xlsx \
+            --master master/master_ng_swing_gdd_v2.xlsx \
+            --output master/master_ng_swing_gdd_v2.xlsx \
             --start "${{ github.event.inputs.start_date }}" \
             --end "${{ github.event.inputs.end_date }}" \
             --date-field "${{ github.event.inputs.date_field }}" \
             --audit-dir audit
+
+      - name: Confirm output files
+        run: |
+          echo "Master folder contents after run:"
+          ls -la master
+
+          echo ""
+          echo "Audit folder contents after run:"
+          ls -la audit || true
+
+          if [ ! -f master/master_ng_swing_gdd_v2.xlsx ]; then
+            echo "ERROR: master/master_ng_swing_gdd_v2.xlsx was not created."
+            exit 1
+          fi
+
+          echo "Master file created/updated successfully."
 
       - name: Upload audit artifact
         if: always()
@@ -93,7 +115,7 @@ jobs:
           name: ng-swing-gdd-audit
           path: |
             audit/*.csv
-            master/master_ng_swing_gdd.xlsx
+            master/master_ng_swing_gdd_v2.xlsx
           if-no-files-found: ignore
 
       - name: Commit updated files
@@ -102,8 +124,8 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          git add master/master_ng_swing_gdd.xlsx
+          git add master/master_ng_swing_gdd_v2.xlsx
           git add audit/last_extracted_ng_swing_gdd.csv
 
-          git commit -m "Update NG Swing GDD master prices" || echo "No changes to commit"
+          git commit -m "Update NG Swing GDD v2 master prices" || echo "No changes to commit"
           git push

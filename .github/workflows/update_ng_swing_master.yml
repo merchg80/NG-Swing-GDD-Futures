@@ -4,13 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       start_date:
-        description: "Start Column D / Strip date to pull, format YYYY-MM-DD"
+        description: "Start date to pull, format YYYY-MM-DD"
         required: true
         default: "2026-06-01"
       end_date:
-        description: "End Column D / Strip date to pull, format YYYY-MM-DD"
+        description: "End date to pull, format YYYY-MM-DD"
         required: true
         default: "2026-06-01"
+      date_field:
+        description: "Use ICE STRIP date or TRADE DATE"
+        required: true
+        default: "strip"
+        type: choice
+        options:
+          - strip
+          - trade_date
 
 jobs:
   update-master:
@@ -23,6 +31,40 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Confirm ICE input file
+        run: |
+          echo "Files in repository:"
+          find . -maxdepth 4 -type f
+
+          echo ""
+          echo "Files in input folder:"
+          ls -la input || true
+
+          if [ ! -f input/icecleared_latest.xlsx ]; then
+            echo "ERROR: The ICE file must be named exactly input/icecleared_latest.xlsx"
+            exit 1
+          fi
+
+          echo "Using input/icecleared_latest.xlsx"
+
+      - name: Confirm master folder
+        run: |
+          echo "Files in master folder:"
+          ls -la master || true
+
+          if [ ! -d master ]; then
+            echo "ERROR: master folder does not exist."
+            exit 1
+          fi
+
+          if [ ! -f master/master_ng_swing_gdd.xlsx ]; then
+            echo "ERROR: master/master_ng_swing_gdd.xlsx does not exist."
+            echo "Upload a blank master file with A1 = Date."
+            exit 1
+          fi
+
+          echo "Using master/master_ng_swing_gdd.xlsx"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -33,14 +75,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Confirm input files
-        run: |
-          echo "Repository files:"
-          find . -maxdepth 4 -type f
-          echo ""
-          echo "Checking for daily file..."
-          test -f input/icecleared_latest.xlsx
-
       - name: Update master workbook
         run: |
           python src/update_ng_swing_master.py \
@@ -49,6 +83,7 @@ jobs:
             --output master/master_ng_swing_gdd.xlsx \
             --start "${{ github.event.inputs.start_date }}" \
             --end "${{ github.event.inputs.end_date }}" \
+            --date-field "${{ github.event.inputs.date_field }}" \
             --audit-dir audit
 
       - name: Upload audit artifact

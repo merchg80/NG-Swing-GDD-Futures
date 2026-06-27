@@ -3,6 +3,10 @@ name: Update NG Swing GDD Master
 on:
   workflow_dispatch:
     inputs:
+      input_file:
+        description: "Exact ICE file path, example: input/icecleared_2026-06-01.xlsx"
+        required: true
+        default: "input/icecleared_2026-06-01.xlsx"
       start_date:
         description: "Start date to pull, format YYYY-MM-DD"
         required: true
@@ -20,7 +24,7 @@ on:
           - strip
           - trade_date
       reset_master:
-        description: "Delete and recreate the master file before running?"
+        description: "Delete and recreate the v2 master file before running?"
         required: true
         default: "false"
         type: choice
@@ -39,21 +43,39 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Confirm ICE input file
+      - name: Confirm selected ICE input file
         run: |
-          echo "Files in repository:"
-          find . -maxdepth 4 -type f
+          echo "Workflow is running on branch:"
+          echo "${GITHUB_REF_NAME}"
+
+          echo ""
+          echo "Recent commit:"
+          git log -1 --oneline
 
           echo ""
           echo "Files in input folder:"
           ls -la input || true
 
-          if [ ! -f input/icecleared_latest.xlsx ]; then
-            echo "ERROR: The ICE file must be named exactly input/icecleared_latest.xlsx"
+          echo ""
+          echo "Requested input file:"
+          echo "${{ github.event.inputs.input_file }}"
+
+          if [ ! -f "${{ github.event.inputs.input_file }}" ]; then
+            echo "ERROR: Requested input file does not exist:"
+            echo "${{ github.event.inputs.input_file }}"
+            echo ""
+            echo "Available input files:"
+            find input -maxdepth 1 -type f -name "*.xlsx" -print
             exit 1
           fi
 
-          echo "Using input/icecleared_latest.xlsx"
+          echo ""
+          echo "Using this ICE file:"
+          echo "${{ github.event.inputs.input_file }}"
+
+          echo ""
+          echo "SHA256 fingerprint of selected ICE file:"
+          sha256sum "${{ github.event.inputs.input_file }}"
 
       - name: Prepare master folder
         run: |
@@ -84,7 +106,7 @@ jobs:
       - name: Update master workbook
         run: |
           python src/update_ng_swing_master.py \
-            --daily input/icecleared_latest.xlsx \
+            --daily "${{ github.event.inputs.input_file }}" \
             --master master/master_ng_swing_gdd_v2.xlsx \
             --output master/master_ng_swing_gdd_v2.xlsx \
             --start "${{ github.event.inputs.start_date }}" \
@@ -106,6 +128,7 @@ jobs:
             exit 1
           fi
 
+          echo ""
           echo "Master file created/updated successfully."
 
       - name: Upload audit artifact

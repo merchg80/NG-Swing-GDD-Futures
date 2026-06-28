@@ -111,15 +111,6 @@ def detect_header_row_and_columns(raw_no_header: pd.DataFrame) -> Tuple[int, Dic
 
     Returns:
     header_row_index, column_map
-
-    column_map example:
-    {
-        "trade_date": 0,
-        "hub": 1,
-        "product": 2,
-        "strip": 3,
-        "settlement_price": 7
-    }
     """
 
     best_row = None
@@ -161,6 +152,31 @@ def detect_header_row_and_columns(raw_no_header: pd.DataFrame) -> Tuple[int, Dic
         "The script needs to find headers equivalent to: "
         "TRADE DATE, HUB, PRODUCT, STRIP, SETTLEMENT PRICE."
     )
+
+
+def save_detected_table_preview(df: pd.DataFrame, audit_dir: str):
+    """
+    Saves a CSV preview of the detected table so you can confirm GitHub Actions
+    is reading the correct rows and columns.
+    """
+
+    audit_path = Path(audit_dir)
+    audit_path.mkdir(parents=True, exist_ok=True)
+
+    preview_file = audit_path / "last_detected_table_preview.csv"
+
+    preview_cols = [
+        "TradeDateRaw",
+        "Hub",
+        "Product",
+        "StripRaw",
+        "DateHeader",
+        "SettlementPrice",
+    ]
+
+    df[preview_cols].head(200).to_csv(preview_file, index=False)
+
+    print(f"Detected table preview saved to: {preview_file}")
 
 
 def read_daily_file(daily_file: str, date_field: str, audit_dir: str) -> pd.DataFrame:
@@ -205,7 +221,6 @@ def read_daily_file(daily_file: str, date_field: str, audit_dir: str) -> pd.Data
         "SettlementPrice": data.iloc[:, col_map["settlement_price"]],
     })
 
-    # Remove fully blank rows.
     df = df.dropna(how="all")
 
     df["Hub"] = df["Hub"].astype(str).str.strip()
@@ -218,7 +233,6 @@ def read_daily_file(daily_file: str, date_field: str, audit_dir: str) -> pd.Data
 
     df["SettlementPrice"] = pd.to_numeric(df["SettlementPrice"], errors="coerce")
 
-    # Remove junk rows where key fields are blank or contain header-like repeats.
     df = df[
         (df["Hub"].notna())
         & (df["Hub"].astype(str).str.strip() != "")
@@ -234,31 +248,6 @@ def read_daily_file(daily_file: str, date_field: str, audit_dir: str) -> pd.Data
     save_detected_table_preview(df, audit_dir)
 
     return df
-
-
-def save_detected_table_preview(df: pd.DataFrame, audit_dir: str):
-    """
-    Saves a CSV preview of the detected table so you can confirm GitHub Actions
-    is reading the correct rows and columns.
-    """
-
-    audit_path = Path(audit_dir)
-    audit_path.mkdir(parents=True, exist_ok=True)
-
-    preview_file = audit_path / "last_detected_table_preview.csv"
-
-    preview_cols = [
-        "TradeDateRaw",
-        "Hub",
-        "Product",
-        "StripRaw",
-        "DateHeader",
-        "SettlementPrice",
-    ]
-
-    df[preview_cols].head(200).to_csv(preview_file, index=False)
-
-    print(f"Detected table preview saved to: {preview_file}")
 
 
 def print_diagnostics(df: pd.DataFrame):
@@ -357,7 +346,6 @@ def filter_daily_prices(
 
     filtered = filtered[["DateHeader", "Hub", "SettlementPrice"]]
 
-    # If duplicate date/hub records exist, keep the last one from the ICE file.
     filtered = filtered.drop_duplicates(subset=["DateHeader", "Hub"], keep="last")
 
     return filtered
@@ -577,18 +565,15 @@ def sort_master(ws):
             if value is not None:
                 data[(date, hub)] = value
 
-    # Clear sheet
     for row in ws.iter_rows():
         for cell in row:
             cell.value = None
 
-    # Rebuild headers
     ws.cell(row=1, column=1).value = "Date"
 
     for col_idx, hub in enumerate(hubs, start=2):
         ws.cell(row=1, column=col_idx).value = hub
 
-    # Rebuild dates and values
     for row_idx, date in enumerate(dates, start=2):
         ws.cell(row=row_idx, column=1).value = date
 
@@ -611,14 +596,12 @@ def format_master(ws):
 
     ws.freeze_panes = "B2"
 
-    # Header row
     for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    # Date column
     for row in range(2, max_row + 1):
         date_cell = ws.cell(row=row, column=1)
         date_cell.font = Font(bold=True)
@@ -626,7 +609,6 @@ def format_master(ws):
         date_cell.alignment = Alignment(horizontal="left", vertical="center")
         date_cell.border = border
 
-    # Price matrix
     for row in range(2, max_row + 1):
         for col in range(2, max_col + 1):
             cell = ws.cell(row=row, column=col)
@@ -722,7 +704,6 @@ def save_master_csv(ws, csv_output_file: str):
 
     df = pd.DataFrame(rows)
 
-    # Drop fully empty rows and columns.
     df = df.dropna(how="all")
     df = df.dropna(axis=1, how="all")
 

@@ -4,17 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       input_file:
-        description: "Exact ICE file path, example: input/icecleared_2026-06-01.xlsx"
+        description: "Exact ICE file path, example: input/icecleared_2026_06_02.xlsx"
         required: true
-        default: "input/icecleared_2026-06-01.xlsx"
+        default: "input/icecleared_2026_06_02.xlsx"
+      expected_date:
+        description: "Date that must exist in the selected ICE file, format YYYY-MM-DD"
+        required: true
+        default: "2026-06-02"
       start_date:
         description: "Start date to pull, format YYYY-MM-DD"
         required: true
-        default: "2026-06-01"
+        default: "2026-06-02"
       end_date:
         description: "End date to pull, format YYYY-MM-DD"
         required: true
-        default: "2026-06-01"
+        default: "2026-06-02"
       date_field:
         description: "Use ICE STRIP date or TRADE DATE"
         required: true
@@ -39,59 +43,52 @@ jobs:
     permissions:
       contents: write
 
+    env:
+      INPUT_FILE: ${{ github.event.inputs.input_file }}
+      EXPECTED_DATE: ${{ github.event.inputs.expected_date }}
+      START_DATE: ${{ github.event.inputs.start_date }}
+      END_DATE: ${{ github.event.inputs.end_date }}
+      DATE_FIELD: ${{ github.event.inputs.date_field }}
+      RESET_MASTER: ${{ github.event.inputs.reset_master }}
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
-      - name: Confirm selected ICE input file
+      - name: Confirm branch and latest commit
         run: |
-          echo "Workflow is running on branch:"
-          echo "${GITHUB_REF_NAME}"
+          echo "Checked-out branch:"
+          git branch --show-current
 
           echo ""
-          echo "Recent commit:"
+          echo "Latest commit:"
           git log -1 --oneline
 
           echo ""
-          echo "Files in input folder:"
-          ls -la input || true
+          echo "Repository status:"
+          git status
+
+      - name: Confirm selected ICE input file exists
+        run: |
+          echo "Requested input file:"
+          echo "$INPUT_FILE"
 
           echo ""
-          echo "Requested input file:"
-          echo "${{ github.event.inputs.input_file }}"
+          echo "Available Excel files in input folder:"
+          find input -maxdepth 1 -type f -name "*.xlsx" -print | sort || true
 
-          if [ ! -f "${{ github.event.inputs.input_file }}" ]; then
+          if [ ! -f "$INPUT_FILE" ]; then
             echo "ERROR: Requested input file does not exist:"
-            echo "${{ github.event.inputs.input_file }}"
-            echo ""
-            echo "Available input files:"
-            find input -maxdepth 1 -type f -name "*.xlsx" -print
+            echo "$INPUT_FILE"
             exit 1
           fi
 
           echo ""
-          echo "Using this ICE file:"
-          echo "${{ github.event.inputs.input_file }}"
-
-          echo ""
-          echo "SHA256 fingerprint of selected ICE file:"
-          sha256sum "${{ github.event.inputs.input_file }}"
-
-      - name: Prepare master folder
-        run: |
-          mkdir -p master
-          mkdir -p audit
-
-          echo "Master folder contents before run:"
-          ls -la master || true
-
-          if [ "${{ github.event.inputs.reset_master }}" = "true" ]; then
-            echo "Reset requested. Deleting existing v2 master file."
-            rm -f master/master_ng_swing_gdd_v2.xlsx
-          fi
-
-          echo "The workflow will use:"
-          echo "master/master_ng_swing_gdd_v2.xlsx"
+          echo "Using ICE file:"
+          echo "$INPUT_FILE"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -103,21 +100,53 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate selected ICE file contents
+        run: |
+          python src/update_ng_swing_master.py \
+            --daily "$INPUT_FILE" \
+            --master master/master_ng_swing_gdd_v2.xlsx \
+            --output master/master_ng_swing_gdd_v2.xlsx \
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --date-field "$DATE_FIELD" \
+            --audit-dir audit \
+            --validate-only \
+            --expected-date "$EXPECTED_DATE"
+
+      - name: Prepare master folder
+        run: |
+          mkdir -p master
+          mkdir -p audit
+
+          echo "Master folder contents before run:"
+          ls -la master || true
+
+          if [ "$RESET_MASTER" = "true" ]; then
+            echo "Reset requested. Deleting existing v2 master files."
+            rm -f master/master_ng_swing_gdd_v2.xlsx
+            rm -f master/master_ng_swing_gdd_v2.csv
+          fi
+
+          echo "The workflow will use:"
+          echo "master/master_ng_swing_gdd_v2.xlsx"
+          echo "master/master_ng_swing_gdd_v2.csv"
+
       - name: Update master workbook
         run: |
           python src/update_ng_swing_master.py \
-            --daily "${{ github.event.inputs.input_file }}" \
+            --daily "$INPUT_FILE" \
             --master master/master_ng_swing_gdd_v2.xlsx \
             --output master/master_ng_swing_gdd_v2.xlsx \
-            --start "${{ github.event.inputs.start_date }}" \
-            --end "${{ github.event.inputs.end_date }}" \
-            --date-field "${{ github.event.inputs.date_field }}" \
-            --audit-dir audit
+            --start "$START_DATE" \
+            --end "$END_DATE" \
+            --date-field "$DATE_FIELD" \
+            --audit-dir audit \
+            --expected-date "$EXPECTED_DATE"
 
       - name: Confirm output files
         run: |
           echo "Master folder contents after run:"
-          ls -la master
+          ls -la master || true
 
           echo ""
           echo "Audit folder contents after run:"
@@ -128,8 +157,13 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f master/master_ng_swing_gdd_v2.csv ]; then
+            echo "ERROR: master/master_ng_swing_gdd_v2.csv was not created."
+            exit 1
+          fi
+
           echo ""
-          echo "Master file created/updated successfully."
+          echo "Master files created/updated successfully."
 
       - name: Upload audit artifact
         if: always()
@@ -139,6 +173,7 @@ jobs:
           path: |
             audit/*.csv
             master/master_ng_swing_gdd_v2.xlsx
+            master/master_ng_swing_gdd_v2.csv
           if-no-files-found: ignore
 
       - name: Commit updated files
@@ -147,8 +182,12 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
+          git pull --rebase origin main
+
           git add master/master_ng_swing_gdd_v2.xlsx
+          git add master/master_ng_swing_gdd_v2.csv
           git add audit/last_extracted_ng_swing_gdd.csv
+          git add audit/last_detected_table_preview.csv
 
           git commit -m "Update NG Swing GDD v2 master prices" || echo "No changes to commit"
-          git push
+          git push origin main

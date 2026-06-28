@@ -182,12 +182,14 @@ jobs:
           git config --global user.name "github-actions"
           git config --global user.email "github-actions@github.com"
 
-          git pull --rebase origin main
-
           git add master/master_ng_swing_gdd_v2.xlsx
           git add master/master_ng_swing_gdd_v2.csv
           git add audit/last_extracted_ng_swing_gdd.csv
           git add audit/last_detected_table_preview.csv
 
-          git commit -m "Update NG Swing GDD v2 master prices" || echo "No changes to commit"
-          git push origin main
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Update NG Swing GDD v2 master prices"
+            git push origin main
+          fi

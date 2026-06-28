@@ -1,7 +1,7 @@
 import argparse
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -11,17 +11,44 @@ from openpyxl.utils import get_column_letter
 
 PRODUCT_FILTER = "NG Swing GDD Futures"
 
-# ICE worksheet expected columns:
-# A = TRADE DATE
-# B = HUB
-# C = PRODUCT
-# D = STRIP
-# H = SETTLEMENT PRICE
-TRADE_DATE_COL_INDEX = 0
-HUB_COL_INDEX = 1
-PRODUCT_COL_INDEX = 2
-STRIP_COL_INDEX = 3
-PRICE_COL_INDEX = 7
+REQUIRED_COLUMNS = {
+    "trade_date": ["trade date", "tradedate", "trade_date"],
+    "hub": ["hub"],
+    "product": ["product"],
+    "strip": ["strip"],
+    "settlement_price": [
+        "settlement price",
+        "settlementprice",
+        "settlement_price",
+        "settle",
+        "settle price",
+        "settlement",
+    ],
+}
+
+
+def clean_text(value) -> str:
+    """
+    Normalizes text for header matching.
+    """
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip().lower()
+    text = text.replace("\n", " ")
+    text = text.replace("\r", " ")
+    text = " ".join(text.split())
+    return text
+
+
+def compact_text(value) -> str:
+    """
+    More aggressive normalization for header matching.
+    """
+    text = clean_text(value)
+    for ch in [" ", "_", "-", ".", "/", "\\"]:
+        text = text.replace(ch, "")
+    return text
 
 
 def normalize_date(value) -> Optional[pd.Timestamp]:
@@ -55,41 +82,146 @@ def normalize_date_header(value) -> Optional[str]:
     return parsed.strftime("%Y-%m-%d")
 
 
-def read_daily_file(daily_file: str, date_field: str) -> pd.DataFrame:
+def header_matches(cell_value, aliases) -> bool:
     """
-    Reads the ICE worksheet.
+    Returns True if a cell value matches one of the allowed header aliases.
+    """
+    cleaned = clean_text(cell_value)
+    compact = compact_text(cell_value)
 
-    date_field options:
-    - strip: use Column D / STRIP
-    - trade_date: use Column A / TRADE DATE
+    for alias in aliases:
+        alias_clean = clean_text(alias)
+        alias_compact = compact_text(alias)
+
+        if cleaned == alias_clean:
+            return True
+
+        if compact == alias_compact:
+            return True
+
+    return False
+
+
+def detect_header_row_and_columns(raw_no_header: pd.DataFrame) -> Tuple[int, Dict[str, int]]:
+    """
+    Finds the actual ICE table header row even if the data does not start on row 1.
+
+    Looks for a row containing:
+    TRADE DATE, HUB, PRODUCT, STRIP, SETTLEMENT PRICE
+
+    Returns:
+    header_row_index, column_map
+    """
+
+    best_row = None
+    best_map = {}
+    best_score = 0
+
+    for row_idx in range(len(raw_no_header)):
+        row_values = list(raw_no_header.iloc[row_idx, :])
+
+        col_map = {}
+
+        for col_idx, value in enumerate(row_values):
+            for logical_name, aliases in REQUIRED_COLUMNS.items():
+                if logical_name in col_map:
+                    continue
+
+                if header_matches(value, aliases):
+                    col_map[logical_name] = col_idx
+
+        score = len(col_map)
+
+        if score > best_score:
+            best_score = score
+            best_row = row_idx
+            best_map = col_map
+
+        if all(key in col_map for key in REQUIRED_COLUMNS):
+            print(f"Detected header row at Excel row {row_idx + 1}")
+            print(f"Detected columns: {col_map}")
+            return row_idx, col_map
+
+    missing = [key for key in REQUIRED_COLUMNS if key not in best_map]
+
+    raise ValueError(
+        "Could not detect the ICE table header row.\n"
+        f"Best detected row: {best_row + 1 if best_row is not None else None}\n"
+        f"Best detected columns: {best_map}\n"
+        f"Missing required columns: {missing}\n\n"
+        "The script needs to find headers equivalent to: "
+        "TRADE DATE, HUB, PRODUCT, STRIP, SETTLEMENT PRICE."
+    )
+
+
+def save_detected_table_preview(df: pd.DataFrame, audit_dir: str):
+    """
+    Saves a CSV preview of the detected table so you can confirm GitHub Actions
+    is reading the correct rows and columns.
+    """
+
+    audit_path = Path(audit_dir)
+    audit_path.mkdir(parents=True, exist_ok=True)
+
+    preview_file = audit_path / "last_detected_table_preview.csv"
+
+    preview_cols = [
+        "TradeDateRaw",
+        "Hub",
+        "Product",
+        "StripRaw",
+        "DateHeader",
+        "SettlementPrice",
+    ]
+
+    df[preview_cols].head(200).to_csv(preview_file, index=False)
+
+    print(f"Detected table preview saved to: {preview_file}")
+
+
+def read_daily_file(daily_file: str, date_field: str, audit_dir: str) -> pd.DataFrame:
+    """
+    Reads the ICE worksheet without assuming the data starts on the same row every day.
+
+    The script:
+    1. Reads the worksheet with no header.
+    2. Searches for the actual table header row.
+    3. Maps the needed columns by header name.
+    4. Reads the rows below that header.
     """
 
     if not os.path.exists(daily_file):
         raise FileNotFoundError(f"Daily file not found: {daily_file}")
 
-    raw = pd.read_excel(daily_file, header=0)
+    raw_no_header = pd.read_excel(daily_file, header=None, dtype=object)
 
-    if raw.shape[1] <= PRICE_COL_INDEX:
-        raise ValueError(
-            f"Daily file does not have enough columns. "
-            f"Expected at least 8 columns through Column H. Found {raw.shape[1]} columns."
-        )
+    if raw_no_header.empty:
+        raise ValueError(f"The daily file appears empty: {daily_file}")
+
+    header_row_idx, col_map = detect_header_row_and_columns(raw_no_header)
+
+    data = raw_no_header.iloc[header_row_idx + 1:, :].copy()
+
+    if data.empty:
+        raise ValueError("The detected header row was found, but no data exists below it.")
 
     if date_field == "trade_date":
-        selected_date_col = TRADE_DATE_COL_INDEX
-        selected_date_label = "TRADE DATE / Column A"
+        selected_date_col = col_map["trade_date"]
+        selected_date_label = "TRADE DATE"
     else:
-        selected_date_col = STRIP_COL_INDEX
-        selected_date_label = "STRIP / Column D"
+        selected_date_col = col_map["strip"]
+        selected_date_label = "STRIP"
 
     df = pd.DataFrame({
-        "SelectedDateRaw": raw.iloc[:, selected_date_col],
-        "TradeDateRaw": raw.iloc[:, TRADE_DATE_COL_INDEX],
-        "StripRaw": raw.iloc[:, STRIP_COL_INDEX],
-        "Hub": raw.iloc[:, HUB_COL_INDEX],
-        "Product": raw.iloc[:, PRODUCT_COL_INDEX],
-        "SettlementPrice": raw.iloc[:, PRICE_COL_INDEX],
+        "SelectedDateRaw": data.iloc[:, selected_date_col],
+        "TradeDateRaw": data.iloc[:, col_map["trade_date"]],
+        "StripRaw": data.iloc[:, col_map["strip"]],
+        "Hub": data.iloc[:, col_map["hub"]],
+        "Product": data.iloc[:, col_map["product"]],
+        "SettlementPrice": data.iloc[:, col_map["settlement_price"]],
     })
+
+    df = df.dropna(how="all")
 
     df["Hub"] = df["Hub"].astype(str).str.strip()
     df["Product"] = df["Product"].astype(str).str.strip()
@@ -101,7 +233,19 @@ def read_daily_file(daily_file: str, date_field: str) -> pd.DataFrame:
 
     df["SettlementPrice"] = pd.to_numeric(df["SettlementPrice"], errors="coerce")
 
+    df = df[
+        (df["Hub"].notna())
+        & (df["Hub"].astype(str).str.strip() != "")
+        & (df["Hub"].astype(str).str.lower() != "nan")
+        & (df["Product"].notna())
+        & (df["Product"].astype(str).str.strip() != "")
+        & (df["Product"].astype(str).str.lower() != "nan")
+    ].copy()
+
     print(f"Using date field: {selected_date_label}")
+    print(f"Rows after header detection and cleanup: {len(df)}")
+
+    save_detected_table_preview(df, audit_dir)
 
     return df
 
@@ -117,14 +261,14 @@ def print_diagnostics(df: pd.DataFrame):
 
     print("")
     print("========== DIAGNOSTICS ==========")
-    print(f"Total rows in file: {len(df)}")
+    print(f"Total detected data rows: {len(df)}")
     print(f"Rows where Product contains '{PRODUCT_FILTER}': {len(product_matches)}")
 
     if product_matches.empty:
         print("")
         print("No matching product rows found.")
         print("Sample Product values:")
-        print(df["Product"].dropna().drop_duplicates().head(25).to_string(index=False))
+        print(df["Product"].dropna().drop_duplicates().head(50).to_string(index=False))
         print("=================================")
         return
 
@@ -177,7 +321,7 @@ def filter_daily_prices(
 
     if product_matches.empty:
         raise ValueError(
-            f"No rows found where Column C / Product contains '{PRODUCT_FILTER}'."
+            f"No rows found where Product contains '{PRODUCT_FILTER}'."
         )
 
     available_dates = sorted(
@@ -202,10 +346,30 @@ def filter_daily_prices(
 
     filtered = filtered[["DateHeader", "Hub", "SettlementPrice"]]
 
-    # If duplicate date/hub records exist, keep the last one from the ICE file.
     filtered = filtered.drop_duplicates(subset=["DateHeader", "Hub"], keep="last")
 
     return filtered
+
+
+def validate_expected_date(prices: pd.DataFrame, expected_date: Optional[str]):
+    """
+    Verifies that the expected date exists in the extracted data.
+    """
+
+    if not expected_date:
+        return
+
+    expected = pd.Timestamp(expected_date).strftime("%Y-%m-%d")
+    dates = sorted(prices["DateHeader"].dropna().unique())
+
+    if expected not in dates:
+        raise ValueError(
+            f"Expected date {expected} was not extracted.\n"
+            f"Extracted dates were: {dates}"
+        )
+
+    matching_rows = prices[prices["DateHeader"] == expected]
+    print(f"Validation passed: {len(matching_rows)} rows extracted for expected date {expected}.")
 
 
 def create_or_load_master(master_file: str):
@@ -236,14 +400,13 @@ def create_or_load_master(master_file: str):
         elif str(a1).strip().lower() == "hub":
             raise ValueError(
                 "The existing master file appears to use the OLD layout with Hub in A1. "
-                "Please replace master/master_ng_swing_gdd.xlsx with a blank workbook "
-                "where A1 = Date."
+                "Delete or reset master/master_ng_swing_gdd_v2.xlsx so the script can "
+                "recreate the correct layout with A1 = Date."
             )
 
         elif str(a1).strip().lower() != "date":
             raise ValueError(
-                f"The existing master file has A1 = '{a1}'. "
-                "Expected A1 = Date."
+                f"The existing master file has A1 = '{a1}'. Expected A1 = Date."
             )
 
     else:
@@ -258,11 +421,6 @@ def create_or_load_master(master_file: str):
 def get_existing_dates(ws):
     """
     Reads existing dates from Column A.
-    Returns:
-    {
-        "2026-06-01": 2,
-        "2026-06-02": 3
-    }
     """
 
     dates = {}
@@ -281,11 +439,6 @@ def get_existing_dates(ws):
 def get_existing_hubs(ws):
     """
     Reads existing hubs from Row 1.
-    Returns:
-    {
-        "ANR-SE": 2,
-        "ANR-SW": 3
-    }
     """
 
     hubs = {}
@@ -412,18 +565,15 @@ def sort_master(ws):
             if value is not None:
                 data[(date, hub)] = value
 
-    # Clear sheet
     for row in ws.iter_rows():
         for cell in row:
             cell.value = None
 
-    # Rebuild headers
     ws.cell(row=1, column=1).value = "Date"
 
     for col_idx, hub in enumerate(hubs, start=2):
         ws.cell(row=1, column=col_idx).value = hub
 
-    # Rebuild dates and values
     for row_idx, date in enumerate(dates, start=2):
         ws.cell(row=row_idx, column=1).value = date
 
@@ -446,14 +596,12 @@ def format_master(ws):
 
     ws.freeze_panes = "B2"
 
-    # Header row
     for cell in ws[1]:
         cell.font = header_font
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    # Date column
     for row in range(2, max_row + 1):
         date_cell = ws.cell(row=row, column=1)
         date_cell.font = Font(bold=True)
@@ -461,7 +609,6 @@ def format_master(ws):
         date_cell.alignment = Alignment(horizontal="left", vertical="center")
         date_cell.border = border
 
-    # Price matrix
     for row in range(2, max_row + 1):
         for col in range(2, max_col + 1):
             cell = ws.cell(row=row, column=col)
@@ -541,6 +688,28 @@ def save_master(wb, output_file: str):
     wb.save(output_path)
 
 
+def save_master_csv(ws, csv_output_file: str):
+    """
+    Saves a CSV copy of the visible master sheet.
+    This makes it easy to confirm in GitHub that dates/prices were actually added.
+    """
+
+    output_path = Path(csv_output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    rows = []
+
+    for row in ws.iter_rows(values_only=True):
+        rows.append(list(row))
+
+    df = pd.DataFrame(rows)
+
+    df = df.dropna(how="all")
+    df = df.dropna(axis=1, how="all")
+
+    df.to_csv(output_path, index=False, header=False)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Update NG Swing GDD Futures master price file."
@@ -554,13 +723,13 @@ def parse_args():
 
     parser.add_argument(
         "--master",
-        default="master/master_ng_swing_gdd.xlsx",
+        default="master/master_ng_swing_gdd_v2.xlsx",
         help="Path to existing master file. Created if it does not exist.",
     )
 
     parser.add_argument(
         "--output",
-        default="master/master_ng_swing_gdd.xlsx",
+        default="master/master_ng_swing_gdd_v2.xlsx",
         help="Path to save updated master file.",
     )
 
@@ -589,6 +758,18 @@ def parse_args():
         help="Directory for audit output files.",
     )
 
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Only validate the input file and extracted rows. Do not update the master.",
+    )
+
+    parser.add_argument(
+        "--expected-date",
+        default=None,
+        help="Optional expected date that must be found in extracted rows.",
+    )
+
     return parser.parse_args()
 
 
@@ -611,7 +792,7 @@ def main():
         raise ValueError("Start and end dates must be valid YYYY-MM-DD dates.") from exc
 
     print(f"Reading daily file: {args.daily}")
-    daily_df = read_daily_file(args.daily, args.date_field)
+    daily_df = read_daily_file(args.daily, args.date_field, args.audit_dir)
 
     print_diagnostics(daily_df)
 
@@ -620,6 +801,7 @@ def main():
     print(f"Date field used: {args.date_field}")
 
     prices = filter_daily_prices(daily_df, start_date, end_date)
+    validate_expected_date(prices, args.expected_date)
 
     print("")
     print("========== EXTRACTED SUMMARY ==========")
@@ -634,6 +816,10 @@ def main():
 
     save_audit_files(prices, args.audit_dir)
 
+    if args.validate_only:
+        print("Validation-only mode complete. Master file was not updated.")
+        return
+
     wb, ws = create_or_load_master(args.master)
 
     cells_written = update_master(ws, prices)
@@ -645,7 +831,11 @@ def main():
 
     save_master(wb, args.output)
 
+    csv_output = str(Path(args.output).with_suffix(".csv"))
+    save_master_csv(ws, csv_output)
+
     print(f"Master file updated successfully: {args.output}")
+    print(f"CSV master mirror saved successfully: {csv_output}")
 
 
 if __name__ == "__main__":

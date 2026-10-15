@@ -6,14 +6,13 @@ import streamlit as st
 
 
 st.set_page_config(
-    page_title="ICE Settlement History",
+    page_title="Natural Gas Pricing History",
     layout="wide",
 )
 
 ROOT = Path(__file__).resolve().parents[1]
-INPUT = ROOT / "input"
 
-IDENTITY = [
+ICE_ID = [
     "contract",
     "product",
     "hub",
@@ -24,7 +23,17 @@ IDENTITY = [
     "product_id",
 ]
 
-REQUIRED = [
+ICE_FAMILY = [
+    "contract",
+    "product",
+    "hub",
+    "contract_type",
+    "strike",
+    "expiration_date",
+    "product_id",
+]
+
+ICE_COLUMNS = [
     "trade_date",
     "hub",
     "product",
@@ -39,17 +48,22 @@ REQUIRED = [
 ]
 
 
-@st.cache_data(show_spinner=False, max_entries=1)
-def load_history(manifest, codes):
-    """
-    Load historical files.
+def manifest(paths):
+    return tuple(
+        (
+            str(path),
+            path.stat().st_mtime_ns,
+            path.stat().st_size,
+        )
+        for path in sorted(paths)
+    )
 
-    Empty codes means every instrument.
-    File metadata invalidates the cache when files change.
-    """
+
+@st.cache_data(show_spinner=False, max_entries=1)
+def load_ice(file_manifest, codes):
     frames = []
 
-    for filename, modified, size in manifest:
+    for filename, modified, size in file_manifest:
         df = pd.read_excel(
             filename,
             engine="openpyxl",
@@ -57,11 +71,11 @@ def load_history(manifest, codes):
         )
 
         df.columns = [
-            str(column).strip().lower().replace(" ", "_")
-            for column in df.columns
+            str(c).strip().lower().replace(" ", "_")
+            for c in df.columns
         ]
 
-        missing = set(REQUIRED) - set(df.columns)
+        missing = set(ICE_COLUMNS) - set(df.columns)
 
         if missing:
             raise ValueError(
@@ -69,7 +83,7 @@ def load_history(manifest, codes):
                 f"{sorted(missing)}"
             )
 
-        df = df[REQUIRED].dropna(how="all").copy()
+        df = df[ICE_COLUMNS].dropna(how="all").copy()
 
         for column in [
             "contract",
@@ -79,15 +93,11 @@ def load_history(manifest, codes):
             "product_id",
         ]:
             df[column] = (
-                df[column]
-                .fillna("")
-                .astype(str)
-                .str.strip()
+                df[column].fillna("").astype(str).str.strip()
             )
 
         df["contract"] = df["contract"].str.upper()
 
-        # Blank import field means load every ICE code.
         if codes:
             df = df[df["contract"].isin(codes)].copy()
 
@@ -100,7 +110,6 @@ def load_history(manifest, codes):
             "expiration_date",
         ]:
             original = df[column]
-
             nonblank = (
                 original.notna()
                 & original.astype(str).str.strip().ne("")
@@ -111,14 +120,9 @@ def load_history(manifest, codes):
                 errors="coerce",
             )
 
-            invalid = nonblank & parsed.isna()
-
-            if invalid.any():
-                examples = original[invalid].head(3).tolist()
-
+            if (nonblank & parsed.isna()).any():
                 raise ValueError(
-                    f"{Path(filename).name}: invalid date "
-                    f"in {column}: {examples}"
+                    f"{Path(filename).name}: invalid {column}"
                 )
 
             df[column] = parsed
@@ -129,7 +133,6 @@ def load_history(manifest, codes):
             "net_change",
         ]:
             original = df[column]
-
             nonblank = (
                 original.notna()
                 & original.astype(str).str.strip().ne("")
@@ -140,27 +143,21 @@ def load_history(manifest, codes):
                 errors="coerce",
             )
 
-            invalid = nonblank & parsed.isna()
-
-            if invalid.any():
+            if (nonblank & parsed.isna()).any():
                 raise ValueError(
-                    f"{Path(filename).name}: invalid "
-                    f"number in {column}"
+                    f"{Path(filename).name}: invalid {column}"
                 )
 
             df[column] = parsed
 
-        bad_identity = (
+        if (
             df["trade_date"].isna()
             | df["strip"].isna()
             | df["contract"].eq("")
-        )
-
-        if bad_identity.any():
+        ).any():
             raise ValueError(
-                f"{Path(filename).name}: "
-                f"{int(bad_identity.sum())} rows are missing "
-                "trade date, delivery strip, or ICE code."
+                f"{Path(filename).name}: missing trade date, "
+                "strip, or ICE code"
             )
 
         df["source_file"] = str(
@@ -170,24 +167,17 @@ def load_history(manifest, codes):
         frames.append(df)
 
     if not frames:
-        raise ValueError(
-            "No pricing records matched. Leave the ICE codes "
-            "field blank to load every instrument."
-        )
+        raise ValueError("No matching ICE records were found.")
 
     data = pd.concat(frames, ignore_index=True)
     del frames
 
-    key = ["trade_date"] + IDENTITY
+    key = ["trade_date"] + ICE_ID
+    duplicated = data.duplicated(key, keep=False)
 
-    duplicate_mask = data.duplicated(
-        subset=key,
-        keep=False,
-    )
+    if duplicated.any():
+        duplicate_rows = data.loc[duplicated]
 
-    duplicate_rows = data.loc[duplicate_mask]
-
-    if not duplicate_rows.empty:
         counts = (
             duplicate_rows.groupby(
                 key,
@@ -197,11 +187,11 @@ def load_history(manifest, codes):
             .nunique(dropna=False)
         )
 
-        conflicting = counts[(counts > 1).any(axis=1)]
+        conflicts = counts[(counts > 1).any(axis=1)]
 
-        if not conflicting.empty:
+        if not conflicts.empty:
             examples = (
-                conflicting.reset_index()[
+                conflicts.reset_index()[
                     ["trade_date", "contract", "hub", "strip"]
                 ]
                 .head(5)
@@ -209,14 +199,10 @@ def load_history(manifest, codes):
             )
 
             raise ValueError(
-                f"{len(conflicting)} duplicate contract/date "
-                "keys contain conflicting prices. Resolve the "
-                "source records before calculating averages.\n\n"
-                f"Examples:\n{examples}"
+                f"{len(conflicts)} conflicting duplicate keys. "
+                "Resolve the source records first.\n\n"
+                + examples
             )
-
-        # Combine the filenames for identical duplicate records.
-        unique_rows = data.loc[~duplicate_mask].copy()
 
         sources = (
             duplicate_rows.groupby(
@@ -224,17 +210,13 @@ def load_history(manifest, codes):
                 dropna=False,
                 observed=True,
             )["source_file"]
-            .agg(
-                lambda values: "; ".join(
-                    sorted(set(values))
-                )
-            )
+            .agg(lambda s: "; ".join(sorted(set(s))))
             .reset_index()
         )
 
-        deduplicated = (
+        clean_duplicates = (
             duplicate_rows.drop(columns="source_file")
-            .drop_duplicates(subset=key)
+            .drop_duplicates(key)
             .merge(
                 sources,
                 on=key,
@@ -244,7 +226,10 @@ def load_history(manifest, codes):
         )
 
         data = pd.concat(
-            [unique_rows, deduplicated],
+            [
+                data.loc[~duplicated],
+                clean_duplicates,
+            ],
             ignore_index=True,
         )
 
@@ -252,8 +237,6 @@ def load_history(manifest, codes):
         ["contract", "hub", "strip", "trade_date"]
     ).reset_index(drop=True)
 
-    # Repeated descriptions and identifiers use less memory
-    # as categorical columns.
     for column in [
         "contract",
         "product",
@@ -267,249 +250,560 @@ def load_history(manifest, codes):
     return data
 
 
-def choose_many(label, frame, column, default=None):
-    """
-    Empty selection means all available values.
-    Selections cascade from the preceding filters.
-    """
+@st.cache_data(show_spinner=False, max_entries=2)
+def load_master(filename, modified, size):
+    df = pd.read_csv(filename)
+    df.columns = [str(c).strip() for c in df.columns]
+
+    date_column = next(
+        (c for c in df.columns if c.lower() == "date"),
+        None,
+    )
+
+    if date_column is None:
+        raise ValueError("The master file needs a Date column.")
+
+    df = df.rename(columns={date_column: "Date"})
+    original_dates = df["Date"]
+    df["Date"] = pd.to_datetime(
+        original_dates,
+        errors="coerce",
+    )
+
+    if df["Date"].isna().any():
+        raise ValueError("The master file contains invalid dates.")
+
+    for column in df.columns:
+        if column == "Date":
+            continue
+
+        original = df[column]
+        parsed = pd.to_numeric(original, errors="coerce")
+
+        nonblank = (
+            original.notna()
+            & original.astype(str).str.strip().ne("")
+        )
+
+        if (nonblank & parsed.isna()).any():
+            raise ValueError(
+                f"Master column {column} contains nonnumeric values."
+            )
+
+        df[column] = parsed
+
+    # Exact duplicate rows are harmless; conflicting dates are not.
+    df = df.drop_duplicates()
+
+    if df["Date"].duplicated().any():
+        raise ValueError(
+            "The master file contains different records "
+            "for the same date."
+        )
+
+    return df.sort_values("Date").set_index("Date")
+
+
+def multiselect_filter(frame, column, label, key, default=None):
     options = sorted(
         frame[column].dropna().unique().tolist()
     )
 
-    if not options:
-        return frame
-
     selected = st.sidebar.multiselect(
         label,
-        options=options,
+        options,
         default=default or [],
-        help="Leave empty to include all available values.",
+        key=key,
+        help="An empty selection includes every available value.",
     )
 
-    if not selected:
-        return frame
+    if selected:
+        return frame[frame[column].isin(selected)]
 
-    return frame[frame[column].isin(selected)]
+    return frame
 
 
-def summarize(frame, metric, monthly=False):
-    work = frame.copy()
-    keys = IDENTITY.copy()
+def select_dates(index, key):
+    first = pd.Timestamp(index.min()).date()
+    last = pd.Timestamp(index.max()).date()
 
-    if monthly:
-        work["trade_month"] = (
-            work["trade_date"].dt.strftime("%Y-%m")
-        )
-        keys.append("trade_month")
+    left, right = st.columns(2)
 
-    return (
-        work.groupby(
-            keys,
-            dropna=False,
-            observed=True,
-        )[metric]
-        .agg(
-            average="mean",
-            observations="count",
-            minimum="min",
-            maximum="max",
-        )
-        .reset_index()
+    start = left.date_input(
+        "Start date",
+        value=first,
+        min_value=first,
+        max_value=last,
+        key=key + "_start",
+    )
+
+    end = right.date_input(
+        "End date",
+        value=last,
+        min_value=first,
+        max_value=last,
+        key=key + "_end",
+    )
+
+    if start > end:
+        st.error("Start date must be on or before end date.")
+        st.stop()
+
+    return pd.Timestamp(start), pd.Timestamp(end)
+
+
+def download(frame, label, filename, key):
+    st.download_button(
+        label,
+        frame.to_csv(index=True).encode("utf-8-sig"),
+        filename,
+        "text/csv",
+        key=key,
     )
 
 
-def csv_bytes(frame):
-    return frame.to_csv(index=False).encode("utf-8-sig")
+def price_report(wide, key, selected_strip_average=False):
+    """
+    Each column is a distinct series.
+
+    Daily table: bottom row is the selected-date mean.
+    Monthly table: bottom row is the same daily-observation mean,
+    not an unweighted mean of unequal-length months.
+    """
+    wide = wide.sort_index().copy()
+    wide = wide.apply(pd.to_numeric, errors="coerce")
+
+    if wide.empty or wide.shape[1] == 0:
+        st.info("No prices match this selection.")
+        return
+
+    original_columns = wide.columns.tolist()
+
+    include_average = False
+
+    if selected_strip_average:
+        include_average = st.checkbox(
+            "Add selected-strip average",
+            value=True,
+            key=key + "_include_average",
+        )
+
+        require_complete = st.checkbox(
+            "Require a price for every selected strip",
+            value=True,
+            key=key + "_complete",
+            help=(
+                "When checked, a daily strip average is blank "
+                "if any selected strip is missing a price."
+            ),
+        )
+
+        if include_average:
+            average = wide[original_columns].mean(axis=1)
+
+            if require_complete:
+                complete = wide[original_columns].notna().all(axis=1)
+                average = average.where(complete)
+
+            wide["Selected-strip average"] = average
+
+    selected_means = wide.mean(axis=0)
+
+    daily = wide.copy()
+    daily.index = daily.index.strftime("%Y-%m-%d")
+    daily.index.name = "Date"
+
+    daily.loc[
+        "AVERAGE OVER SELECTED DATES"
+    ] = selected_means
+
+    monthly = wide.groupby(
+        wide.index.to_period("M")
+    ).mean()
+
+    monthly.index = monthly.index.astype(str)
+    monthly.index.name = "Month"
+
+    monthly.loc[
+        "AVERAGE OVER SELECTED DATES"
+    ] = selected_means
+
+    counts = wide.groupby(
+        wide.index.to_period("M")
+    ).count()
+
+    counts.index = counts.index.astype(str)
+    counts.index.name = "Month"
+
+    counts.loc[
+        "TOTAL OBSERVATIONS"
+    ] = wide.count()
+
+    chart_type = st.radio(
+        "Chart frequency",
+        ["Daily", "Monthly average"],
+        horizontal=True,
+        key=key + "_frequency",
+    )
+
+    chart = (
+        wide.copy()
+        if chart_type == "Daily"
+        else wide.groupby(
+            wide.index.to_period("M")
+        ).mean()
+    )
+
+    if chart_type != "Daily":
+        chart.index = chart.index.to_timestamp()
+
+    if chart.shape[1] > 30:
+        st.info(
+            "Select 30 or fewer series to show the chart. "
+            "All selected series remain in the tables."
+        )
+
+    else:
+        chart.index.name = "Date"
+
+        long = (
+            chart.reset_index()
+            .melt(
+                id_vars="Date",
+                var_name="Series",
+                value_name="Value",
+            )
+        )
+
+        fig = px.line(
+            long,
+            x="Date",
+            y="Value",
+            color="Series",
+            markers=True,
+        )
+
+        fig.update_traces(connectgaps=False)
+
+        if include_average:
+            for trace in fig.data:
+                if trace.name == "Selected-strip average":
+                    trace.line.update(
+                        color="black",
+                        width=4,
+                        dash="dash",
+                    )
+
+        fig.update_layout(
+            height=530,
+            legend={
+                "orientation": "h",
+                "y": -0.25,
+                "yanchor": "top",
+            },
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+        )
+
+    daily_tab, monthly_tab, counts_tab = st.tabs(
+        [
+            "Daily table",
+            "Monthly averages",
+            "Observation counts",
+        ]
+    )
+
+    with daily_tab:
+        st.dataframe(
+            daily.style.format("{:.4f}", na_rep=""),
+            use_container_width=True,
+        )
+
+        download(
+            daily,
+            "Download daily table",
+            key + "_daily.csv",
+            key + "_daily_download",
+        )
+
+    with monthly_tab:
+        st.dataframe(
+            monthly.style.format("{:.4f}", na_rep=""),
+            use_container_width=True,
+        )
+
+        st.caption(
+            "The bottom row averages the underlying daily "
+            "observations across the selected dates. "
+            "It is not an equal-weight average of monthly averages."
+        )
+
+        download(
+            monthly,
+            "Download monthly table",
+            key + "_monthly.csv",
+            key + "_monthly_download",
+        )
+
+    with counts_tab:
+        st.dataframe(
+            counts,
+            use_container_width=True,
+        )
 
 
-st.title("ICE Settlement History")
+st.title("Natural Gas Pricing Analysis")
 
-st.caption(
-    "Access historical instruments from the settlement files. "
-    "Filter by ICE code, product, hub, delivery strip, "
-    "and trading dates."
+section = st.sidebar.radio(
+    "Dataset",
+    [
+        "ICE settlements",
+        "NG Swing GDD master output",
+    ],
 )
 
-with st.sidebar:
-    st.header("Import settings")
-
-    # Blank by default: every instrument is available.
-    code_text = st.text_input(
-        "ICE codes to load",
-        value="",
-        help=(
-            "Leave blank to load every ICE code. "
-            "Optionally enter comma-separated codes "
-            "to reduce the import size."
-        ),
-    )
-
-    st.caption(
-        "Blank loads every instrument in the files. "
-        "Use the report filters below to choose what "
-        "you want to analyze."
-    )
-
-    refresh = st.button("Reload available files")
-
-    st.caption(
-        "Reload rereads files available on this server. "
-        "It does not pull GitHub changes itself."
-    )
-
-if refresh:
+if st.sidebar.button("Reload available files"):
     st.cache_data.clear()
     st.rerun()
 
-codes = tuple(
-    sorted(
-        {
-            item.strip().upper()
-            for item in code_text.split(",")
-            if item.strip()
-        }
-    )
+st.sidebar.caption(
+    "Reload clears cached data on this server. "
+    "GitHub updates must first reach the deployed app."
 )
-
-files = sorted(
-    path
-    for path in INPUT.rglob("icecleared*.xlsx")
-    if not path.name.startswith("~$")
-)
-
-if not files:
-    st.error(
-        "No icecleared*.xlsx files were found "
-        "in the repository's input folder."
-    )
-    st.stop()
-
-manifest = tuple(
-    (
-        str(path),
-        path.stat().st_mtime_ns,
-        path.stat().st_size,
-    )
-    for path in files
-)
-
-try:
-    with st.spinner(
-        "Loading and checking settlement history. "
-        "The first import may take several minutes..."
-    ):
-        data = load_history(manifest, codes)
-
-except Exception as error:
-    st.error(str(error))
-    st.stop()
 
 st.caption(
-    f"{len(files):,} source files | "
-    f"{len(data):,} unique loaded records | "
-    f"{data['contract'].nunique():,} ICE codes | "
-    f"Trade dates: "
-    f"{data['trade_date'].min():%b %d, %Y} "
-    f"through {data['trade_date'].max():%b %d, %Y}"
+    "Averages use available numeric observations. "
+    "Missing values are excluded and zeros are included. "
+    "Downloads are optional."
 )
 
-if codes:
-    missing_codes = sorted(
-        set(codes)
-        - set(data["contract"].dropna().unique())
+
+if section == "NG Swing GDD master output":
+    st.header("NG Swing GDD master output")
+
+    master_files = sorted(
+        (ROOT / "master").rglob("*.csv")
     )
 
-    if missing_codes:
-        st.warning(
-            "Codes not found: " + ", ".join(missing_codes)
-        )
+    if not master_files:
+        st.error("No CSV files were found in the master folder.")
+        st.stop()
 
-st.sidebar.header("Report filters")
-
-st.sidebar.caption(
-    "An empty report filter means all available values. "
-    "Options narrow as you make selections."
-)
-
-available_codes = sorted(
-    data["contract"].dropna().unique().tolist()
-)
-
-preferred = next(
-    (
-        code
-        for code in ["HXS", "FQT", "TPH"]
-        if code in available_codes
-    ),
-    available_codes[0],
-)
-
-view = choose_many(
-    "ICE code",
-    data,
-    "contract",
-    default=[preferred],
-)
-
-view = choose_many(
-    "Product",
-    view,
-    "product",
-)
-
-view = choose_many(
-    "Hub",
-    view,
-    "hub",
-)
-
-# No default type exclusion: futures and options remain accessible.
-view = choose_many(
-    "Contract type",
-    view,
-    "contract_type",
-)
-
-available_strips = sorted(
-    view["strip"].dropna().unique().tolist()
-)
-
-if not available_strips:
-    st.info("No delivery strips match these filters.")
-    st.stop()
-
-chosen_strips = st.sidebar.multiselect(
-    "Delivery strip",
-    options=available_strips,
-    default=available_strips[:1],
-    format_func=lambda value: (
-        pd.Timestamp(value).strftime("%b %d, %Y")
-    ),
-    help=(
-        "Select one or more delivery periods. "
-        "Clear the selection to include all."
-    ),
-)
-
-if chosen_strips:
-    view = view[
-        view["strip"].isin(chosen_strips)
+    preferred_files = [
+        p for p in master_files
+        if p.name.lower().startswith("master_ng_swing_gdd")
     ]
 
-# These additional filters allow individual option
-# contracts and expirations to be isolated.
-with st.sidebar.expander("Additional contract filters"):
+    default_file = (
+        preferred_files[0]
+        if preferred_files
+        else master_files[0]
+    )
+
+    master_path = st.sidebar.selectbox(
+        "Master file",
+        options=master_files,
+        index=master_files.index(default_file),
+        format_func=lambda p: str(p.relative_to(ROOT)),
+    )
+
+    try:
+        with st.spinner("Reading master output..."):
+            data = load_master(
+                str(master_path),
+                master_path.stat().st_mtime_ns,
+                master_path.stat().st_size,
+            )
+
+    except Exception as error:
+        st.error(str(error))
+        st.stop()
+
+    st.caption(
+        f"{len(data):,} dates | "
+        f"{len(data.columns):,} hub series | "
+        f"{data.index.min():%b %d, %Y} through "
+        f"{data.index.max():%b %d, %Y}"
+    )
+
+    st.info(
+        "These are values from the daily process's master output. "
+        "The file does not identify actual versus modeled values "
+        "or provide a historical run/as-of date."
+    )
+
+    start, end = select_dates(
+        data.index,
+        "master",
+    )
+
+    hubs = data.columns.tolist()
+
+    defaults = [
+        hub for hub in [
+            "HSC",
+            "Henry",
+            "Waha",
+            "TETCO-M3",
+        ]
+        if hub in hubs
+    ]
+
+    selected_hubs = st.sidebar.multiselect(
+        "Master-output hubs",
+        hubs,
+        default=defaults or hubs[:1],
+    )
+
+    if not selected_hubs:
+        st.info("Select at least one hub.")
+        st.stop()
+
+    selected = data.loc[
+        (data.index >= start)
+        & (data.index <= end),
+        selected_hubs,
+    ]
+
+    st.caption(
+        "Each hub has its own average row. "
+        "Different hubs are not blended into one price."
+    )
+
+    price_report(
+        selected,
+        "master_report",
+        selected_strip_average=False,
+    )
+
+
+else:
+    st.header("ICE settlements")
+
+    code_text = st.sidebar.text_input(
+        "ICE codes to load",
+        value="",
+        help=(
+            "Blank loads all instruments. "
+            "Optionally enter comma-separated codes."
+        ),
+    )
+
+    codes = tuple(
+        sorted({
+            x.strip().upper()
+            for x in code_text.split(",")
+            if x.strip()
+        })
+    )
+
+    paths = [
+        p for p in (ROOT / "input").rglob("icecleared*.xlsx")
+        if not p.name.startswith("~$")
+    ]
+
+    if not paths:
+        st.error("No icecleared*.xlsx files found in input.")
+        st.stop()
+
+    try:
+        with st.spinner(
+            "Loading settlement history. "
+            "The initial full import may take several minutes..."
+        ):
+            data = load_ice(
+                manifest(paths),
+                codes,
+            )
+
+    except Exception as error:
+        st.error(str(error))
+        st.stop()
+
+    st.caption(
+        f"{len(paths):,} files | "
+        f"{len(data):,} unique records | "
+        f"{data['contract'].nunique():,} ICE codes | "
+        f"{data['trade_date'].min():%b %d, %Y} through "
+        f"{data['trade_date'].max():%b %d, %Y}"
+    )
+
+    start, end = select_dates(
+        data["trade_date"],
+        "ice",
+    )
+
+    available_codes = sorted(
+        data["contract"].unique().tolist()
+    )
+
+    default_code = next(
+        (
+            c for c in ["HXS", "FQT", "TPH"]
+            if c in available_codes
+        ),
+        available_codes[0],
+    )
+
+    view = multiselect_filter(
+        data,
+        "contract",
+        "ICE code",
+        "ice_code",
+        default=[default_code],
+    )
+
+    view = multiselect_filter(
+        view,
+        "product",
+        "Product",
+        "ice_product",
+    )
+
+    view = multiselect_filter(
+        view,
+        "hub",
+        "Hub",
+        "ice_hub",
+    )
+
+    view = multiselect_filter(
+        view,
+        "contract_type",
+        "Contract type",
+        "ice_type",
+    )
+
+    strips = sorted(
+        view["strip"].dropna().unique().tolist()
+    )
+
+    selected_strips = st.sidebar.multiselect(
+        "Delivery strips",
+        strips,
+        default=strips[:1],
+        format_func=lambda x: (
+            pd.Timestamp(x).strftime("%b %d, %Y")
+        ),
+        help="Clear the selection to include all available strips.",
+    )
+
+    if selected_strips:
+        view = view[
+            view["strip"].isin(selected_strips)
+        ]
+
     strikes = sorted(
         view["strike"].dropna().unique().tolist()
     )
 
-    selected_strikes = st.multiselect(
-        "Strike",
-        options=strikes,
-        help=(
-            "Leave empty for all strikes, including "
-            "records with no strike."
-        ),
+    selected_strikes = st.sidebar.multiselect(
+        "Strike, if applicable",
+        strikes,
+        help="Empty includes all strikes and records with no strike.",
     )
 
     if selected_strikes:
@@ -517,262 +811,133 @@ with st.sidebar.expander("Additional contract filters"):
             view["strike"].isin(selected_strikes)
         ]
 
-    expirations = sorted(
-        view["expiration_date"]
-        .dropna()
-        .unique()
-        .tolist()
+    metric_label = st.sidebar.selectbox(
+        "Price field",
+        ["Settlement price", "Net change"],
     )
 
-    selected_expirations = st.multiselect(
-        "Expiration date",
-        options=expirations,
-        format_func=lambda value: (
-            pd.Timestamp(value).strftime("%b %d, %Y")
-        ),
-        help="Leave empty for all expirations.",
+    metric = (
+        "settlement_price"
+        if metric_label == "Settlement price"
+        else "net_change"
     )
 
-    if selected_expirations:
-        view = view[
-            view["expiration_date"].isin(
-                selected_expirations
-            )
-        ]
+    view = view[
+        view["trade_date"].between(start, end)
+    ].copy()
 
-metric_label = st.sidebar.selectbox(
-    "Price field",
-    options=[
-        "Settlement price",
-        "Net change",
-    ],
-)
+    if view.empty:
+        st.info("No records match the filters.")
+        st.stop()
 
-metric = (
-    "settlement_price"
-    if metric_label == "Settlement price"
-    else "net_change"
-)
+    # Expirations can differ by delivery strip.
+    # Keep expiration in the table-column identity rather
+    # than splitting the strip comparison into separate reports.
+    family_columns = [
+        c for c in ICE_FAMILY
+        if c != "expiration_date"
+    ]
 
-first_date = data["trade_date"].min().date()
-last_date = data["trade_date"].max().date()
-
-date_range = st.sidebar.date_input(
-    "Trade-date range",
-    value=(first_date, last_date),
-    min_value=first_date,
-    max_value=last_date,
-)
-
-if len(date_range) != 2:
-    st.info(
-        "Select both a first and last trade date."
-    )
-    st.stop()
-
-start, end = date_range
-
-if start > end:
-    st.error(
-        "The first trade date must precede "
-        "the last trade date."
-    )
-    st.stop()
-
-view = view[
-    view["trade_date"].between(
-        pd.Timestamp(start),
-        pd.Timestamp(end),
-    )
-].copy()
-
-if view.empty:
-    st.info(
-        "No records match the selected filters."
-    )
-    st.stop()
-
-period = summarize(
-    view,
-    metric,
-)
-
-monthly = summarize(
-    view,
-    metric,
-    monthly=True,
-)
-
-left, middle, right = st.columns(3)
-
-left.metric(
-    "Matching records",
-    f"{len(view):,}",
-)
-
-middle.metric(
-    "Numeric observations",
-    f"{view[metric].count():,}",
-)
-
-right.metric(
-    "Separate price series",
-    f"{len(period):,}",
-)
-
-st.caption(
-    "Averages are arithmetic averages of available "
-    "observations, not volume-weighted. Missing prices "
-    "are excluded; zero prices are included. Each code, "
-    "product, hub, strip, type, strike, expiration, "
-    "and product ID is calculated separately. "
-    "Missing trading dates are not filled."
-)
-
-chart_view = st.radio(
-    "Chart view",
-    options=[
-        "Daily prices",
-        "Monthly averages",
-    ],
-    horizontal=True,
-)
-
-if len(period) > 30:
-    st.info(
-        "More than 30 price series are selected. "
-        "Narrow the report filters to display the chart. "
-        "All matching results remain available "
-        "in the tables."
+    grouped = view.groupby(
+        family_columns,
+        observed=True,
+        dropna=False,
+        sort=True,
     )
 
-else:
-    chart_data = (
-        view.copy()
-        if chart_view == "Daily prices"
-        else monthly.copy()
-    )
-
-    chart_data["series"] = chart_data[
-        IDENTITY
-    ].apply(
-        lambda row: " | ".join(
-            f"{column}={row[column]}"
-            for column in IDENTITY
-        ),
-        axis=1,
-    )
-
-    if chart_view == "Daily prices":
-        x_column = "trade_date"
-        y_column = metric
-        x_label = "Trade date"
+    if grouped.ngroups > 20:
+        st.info(
+            "More than 20 contract groups match. "
+            "Narrow the code, product, hub, type, or strike filters "
+            "to display price tables."
+        )
 
     else:
-        x_column = "trade_month"
-        y_column = "average"
-        x_label = "Trade month"
+        for position, (labels, group) in enumerate(grouped):
+            if not isinstance(labels, tuple):
+                labels = (labels,)
 
-    chart_data = chart_data.sort_values(
-        x_column
-    )
+            heading = " | ".join(
+                f"{column}: {label}"
+                for column, label in zip(
+                    family_columns,
+                    labels,
+                )
+                if pd.notna(label) and str(label) != ""
+            )
 
-    fig = px.line(
-        chart_data,
-        x=x_column,
-        y=y_column,
-        color="series",
-        markers=True,
-        labels={
-            x_column: x_label,
-            y_column: metric_label,
-            "series": "Contract series",
-        },
-    )
+            st.subheader(heading)
 
-    fig.update_traces(
-        connectgaps=False,
-    )
+            group = group.copy()
 
-    fig.update_layout(
-        height=550,
-        legend={
-            "orientation": "h",
-            "yanchor": "top",
-            "y": -0.25,
-        },
-    )
+            # Usually one expiration per strip. If the source
+            # contains several, expose them as separate columns.
+            expirations_per_strip = (
+                group.groupby(
+                    "strip",
+                    observed=True,
+                    dropna=False,
+                )["expiration_date"]
+                .nunique(dropna=False)
+            )
 
-    st.plotly_chart(
-        fig,
-        use_container_width=True,
-    )
+            multiple_expirations = (
+                expirations_per_strip > 1
+            ).any()
 
-tab1, tab2, tab3 = st.tabs(
-    [
-        "Selected-period averages",
-        "Monthly averages",
-        "Underlying prices",
-    ]
-)
+            group["delivery_column"] = (
+                group["strip"].dt.strftime("%Y-%m-%d")
+            )
 
-with tab1:
-    st.caption(
-        "One average per distinct price series "
-        "across the selected trading-date range."
-    )
+            if multiple_expirations:
+                group["delivery_column"] = (
+                    group["delivery_column"]
+                    + " | expires "
+                    + group["expiration_date"]
+                    .dt.strftime("%Y-%m-%d")
+                    .fillna("unspecified")
+                )
 
-    st.dataframe(
-        period,
-        use_container_width=True,
-        hide_index=True,
-    )
+            if group.duplicated(
+                ["trade_date", "delivery_column"]
+            ).any():
+                st.error(
+                    "Multiple instrument identities map to one "
+                    "table cell. Narrow the filters."
+                )
+                continue
 
-    st.download_button(
-        "Download period averages CSV",
-        data=csv_bytes(period),
-        file_name="ice_period_averages.csv",
-        mime="text/csv",
-    )
+            wide = group.pivot(
+                index="trade_date",
+                columns="delivery_column",
+                values=metric,
+            )
 
-with tab2:
-    st.caption(
-        "Average of daily observations within "
-        "each trading month, keeping delivery "
-        "strips and contract identities separate."
-    )
+            wide.columns.name = None
 
-    st.dataframe(
-        monthly,
-        use_container_width=True,
-        hide_index=True,
-    )
+            st.caption(
+                f"Price field: {metric_label}. "
+                "The strip average equally weights the selected "
+                "delivery columns. It is not volume-weighted "
+                "or weighted by days in the delivery month."
+            )
 
-    st.download_button(
-        "Download monthly averages CSV",
-        data=csv_bytes(monthly),
-        file_name="ice_monthly_averages.csv",
-        mime="text/csv",
-    )
+            price_report(
+                wide,
+                f"ice_group_{position}",
+                selected_strip_average=True,
+            )
 
-with tab3:
-    prices = view.sort_values(
-        [
-            "trade_date",
-            "contract",
-            "strip",
-        ]
-    )
+    with st.expander("Underlying ICE records and source files"):
+        st.dataframe(
+            view,
+            use_container_width=True,
+            hide_index=True,
+        )
 
-    st.dataframe(
-        prices,
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.download_button(
-        "Download underlying prices CSV",
-        data=csv_bytes(prices),
-        file_name="ice_prices.csv",
-        mime="text/csv",
-    )
+        st.download_button(
+            "Download underlying ICE records",
+            view.to_csv(index=False).encode("utf-8-sig"),
+            "ice_underlying_records.csv",
+            "text/csv",
+        )

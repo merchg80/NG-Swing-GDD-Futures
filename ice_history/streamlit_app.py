@@ -52,38 +52,21 @@ def read_catalog(signature):
 @st.cache_data(max_entries=2, show_spinner=False)
 def read_master(signature):
     df = pd.read_csv(signature[0])
-    df.columns = [
-        str(column).strip()
-        for column in df.columns
-    ]
+    df.columns = [str(c).strip() for c in df.columns]
 
     date_column = next(
-        (
-            column
-            for column in df.columns
-            if column.lower() == "date"
-        ),
+        (c for c in df.columns if c.lower() == "date"),
         None,
     )
 
     if date_column is None:
-        raise ValueError(
-            "The master CSV has no Date column."
-        )
+        raise ValueError("The master CSV has no Date column.")
 
-    df = df.rename(
-        columns={date_column: "Date"}
-    )
-
-    df["Date"] = pd.to_datetime(
-        df["Date"],
-        errors="raise",
-    )
+    df = df.rename(columns={date_column: "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], errors="raise")
 
     if df["Date"].isna().any():
-        raise ValueError(
-            "The master CSV contains missing dates."
-        )
+        raise ValueError("The master CSV contains missing dates.")
 
     for column in df.columns:
         if column != "Date":
@@ -96,64 +79,62 @@ def read_master(signature):
 
     if df["Date"].duplicated().any():
         raise ValueError(
-            "The master CSV has conflicting "
-            "records for the same date."
+            "The master CSV has conflicting records for one date."
         )
 
-    return (
-        df.sort_values("Date")
-        .set_index("Date")
-    )
+    return df.sort_values("Date").set_index("Date")
 
 
 @st.cache_data(max_entries=4, show_spinner=False)
 def query_prices(
     archive_signature,
-    contract,
-    product,
-    hub,
-    start,
-    end,
+    instruments,
+    trade_start,
+    trade_end,
 ):
     connection = duckdb.connect()
 
     try:
-        connection.execute(
-            "SET memory_limit='512MB'"
-        )
-
-        connection.execute(
-            "SET threads=2"
-        )
+        connection.execute("SET memory_limit='512MB'")
+        connection.execute("SET threads=2")
 
         connection.read_parquet(
-            str(
-                ARCHIVE
-                / "parts"
-                / "*.parquet"
-            ),
+            str(ARCHIVE / "parts" / "*.parquet"),
             union_by_name=True,
         ).create_view("prices")
 
-        # Retrieve only the selected product, hub,
-        # code, and date range.
+        wanted = pd.DataFrame(
+            instruments,
+            columns=IDENTITY,
+        )
+
+        # Explicit types also handle selections with all-null strikes
+        # or expiration dates.
+        for column in ["strip", "expiration_date"]:
+            wanted[column] = pd.to_datetime(wanted[column])
+
+        wanted["strike"] = pd.to_numeric(
+            wanted["strike"],
+            errors="raise",
+        ).astype("float64")
+
+        connection.register("wanted_instruments", wanted)
+
+        join_conditions = " AND ".join(
+            f'p."{column}" IS NOT DISTINCT FROM w."{column}"'
+            for column in IDENTITY
+        )
+
         result = connection.execute(
-            """
-            SELECT DISTINCT *
-            FROM prices
-            WHERE contract = ?
-              AND product = ?
-              AND hub = ?
-              AND trade_date >= CAST(? AS DATE)
-              AND trade_date <= CAST(? AS DATE)
+            f"""
+            SELECT DISTINCT p.*
+            FROM prices AS p
+            INNER JOIN wanted_instruments AS w
+              ON {join_conditions}
+            WHERE p.trade_date >= CAST(? AS DATE)
+              AND p.trade_date <= CAST(? AS DATE)
             """,
-            [
-                contract,
-                product,
-                hub,
-                str(start),
-                str(end),
-            ],
+            [str(trade_start), str(trade_end)],
         ).df()
 
         return result
@@ -162,14 +143,31 @@ def query_prices(
         connection.close()
 
 
-def date_controls(first, last, key):
+def date_controls(
+    first,
+    last,
+    key,
+    start_label="Start date",
+    end_label="End date",
+):
     first = pd.Timestamp(first).date()
     last = pd.Timestamp(last).date()
+
+    # Keep saved dates within the current data's bounds.
+    for suffix, default in [
+        ("_start", first),
+        ("_end", last),
+    ]:
+        state_key = key + suffix
+        current = st.session_state.get(state_key, default)
+
+        if not first <= current <= last:
+            st.session_state[state_key] = default
 
     left, right = st.columns(2)
 
     start = left.date_input(
-        "Start date",
+        start_label,
         value=first,
         min_value=first,
         max_value=last,
@@ -177,7 +175,7 @@ def date_controls(first, last, key):
     )
 
     end = right.date_input(
-        "End date",
+        end_label,
         value=last,
         min_value=first,
         max_value=last,
@@ -186,59 +184,65 @@ def date_controls(first, last, key):
 
     if start > end:
         st.error(
-            "Start date must be on or before end date."
+            f"{start_label} must be on or before {end_label.lower()}."
         )
         st.stop()
 
     return start, end
 
 
-def filter_catalog(
-    frame,
-    column,
-    label,
-    key,
-):
+def multi_filter(frame, column, label, key):
     options = sorted(
-        frame[column]
-        .dropna()
-        .unique()
-        .tolist()
+        frame[column].dropna().unique().tolist()
     )
 
     if not options:
         return frame
 
+    # Remove selections that are unavailable after upstream changes.
+    if key in st.session_state:
+        st.session_state[key] = [
+            value
+            for value in st.session_state[key]
+            if value in options
+        ]
+
     selected = st.sidebar.multiselect(
         label,
-        options,
+        options=options,
         key=key,
-        help=(
-            "Leave empty to include every "
-            "available value."
-        ),
+        help="Leave empty to include all available values.",
     )
 
     if selected:
-        return frame[
-            frame[column].isin(selected)
-        ]
+        return frame[frame[column].isin(selected)]
 
     return frame
 
 
-def report(
+def instrument_tuple(row):
+    return tuple(
+        None if pd.isna(value) else value
+        for value in row
+    )
+
+
+def show_report(
     wide,
     key,
+    metric_label,
     strip_average=False,
-    metric_label="Price",
+    expected_columns=None,
 ):
     wide = wide.sort_index().copy()
 
-    if wide.empty:
-        st.info(
-            "No values match these dates."
-        )
+    if expected_columns:
+        # Retain requested delivery columns even if all their
+        # prices are missing within the chosen trade dates.
+        wide = wide.reindex(columns=expected_columns)
+
+    if wide.empty or wide.shape[1] == 0:
+        st.info("No records match this selection.")
         return
 
     if strip_average:
@@ -249,13 +253,12 @@ def report(
         )
 
         require_all = st.checkbox(
-            "Require all selected strips for the average",
+            "Require every selected delivery column for the average",
             value=True,
             key=key + "_complete",
             help=(
-                "When checked, the strip average "
-                "is blank on a date if any selected "
-                "delivery column has no price."
+                "A daily strip average is blank when a selected "
+                "delivery column has no numeric price on that date."
             ),
         )
 
@@ -267,9 +270,7 @@ def report(
                     wide.notna().all(axis=1)
                 )
 
-            wide[
-                "Selected-strip average"
-            ] = average
+            wide["Selected-strip average"] = average
 
     means = wide.mean()
 
@@ -279,29 +280,23 @@ def report(
 
     frequency = st.radio(
         "Chart frequency",
-        ["Daily", "Monthly"],
+        options=["Daily", "Monthly"],
         horizontal=True,
         key=key + "_frequency",
     )
 
-    if frequency == "Daily":
-        chart = wide.copy()
-    else:
-        chart = monthly.copy()
-        chart.index = (
-            chart.index.to_timestamp()
-        )
+    chart = wide.copy() if frequency == "Daily" else monthly.copy()
+
+    if frequency == "Monthly":
+        chart.index = chart.index.to_timestamp()
 
     if chart.shape[1] <= 30:
         chart.index.name = "Date"
 
-        long = (
-            chart.reset_index()
-            .melt(
-                id_vars="Date",
-                var_name="Series",
-                value_name="Value",
-            )
+        long = chart.reset_index().melt(
+            id_vars="Date",
+            var_name="Series",
+            value_name="Value",
         )
 
         figure = px.line(
@@ -310,20 +305,13 @@ def report(
             y="Value",
             color="Series",
             markers=True,
-            labels={
-                "Value": metric_label,
-            },
+            labels={"Value": metric_label},
         )
 
-        figure.update_traces(
-            connectgaps=False
-        )
+        figure.update_traces(connectgaps=False)
 
         for trace in figure.data:
-            if (
-                trace.name
-                == "Selected-strip average"
-            ):
+            if trace.name == "Selected-strip average":
                 trace.line.update(
                     color="black",
                     width=4,
@@ -346,50 +334,33 @@ def report(
 
     else:
         st.info(
-            "Select 30 or fewer series to chart "
-            "them. All selected series remain "
-            "available in the tables."
+            "This selection contains more than 30 chart lines. "
+            "Narrow the delivery range to show the chart. "
+            "All selected columns remain in the tables."
         )
 
     daily = wide.copy()
-    daily.index = (
-        daily.index.strftime("%Y-%m-%d")
-    )
+    daily.index = daily.index.strftime("%Y-%m-%d")
     daily.index.name = "Date"
+    daily.loc["AVERAGE OVER SELECTED DATES"] = means
 
-    daily.loc[
-        "AVERAGE OVER SELECTED DATES"
-    ] = means
-
-    monthly.index = (
-        monthly.index.astype(str)
-    )
+    monthly.index = monthly.index.astype(str)
     monthly.index.name = "Month"
-
-    monthly.loc[
-        "AVERAGE OVER SELECTED DATES"
-    ] = means
+    monthly.loc["AVERAGE OVER SELECTED DATES"] = means
 
     counts = wide.groupby(
         wide.index.to_period("M")
     ).count()
 
-    counts.index = (
-        counts.index.astype(str)
-    )
+    counts.index = counts.index.astype(str)
     counts.index.name = "Month"
+    counts.loc["TOTAL OBSERVATIONS"] = wide.count()
 
-    counts.loc[
-        "TOTAL OBSERVATIONS"
-    ] = wide.count()
-
-    tabs = st.tabs(
-        [
-            "Daily prices",
-            "Monthly averages",
-            "Observation counts",
-        ]
-    )
+    tabs = st.tabs([
+        "Daily prices",
+        "Monthly averages",
+        "Observation counts",
+    ])
 
     for tab, frame, title in zip(
         tabs,
@@ -411,71 +382,49 @@ def report(
                     use_container_width=True,
                 )
 
-            prepare_download = st.checkbox(
+            if st.checkbox(
                 "Prepare CSV download",
-                key=(
-                    key
-                    + "_"
-                    + title
-                    + "_prepare"
-                ),
-            )
-
-            if prepare_download:
+                key=key + "_" + title + "_prepare",
+            ):
                 st.download_button(
                     "Download CSV",
-                    data=frame.to_csv().encode(
-                        "utf-8-sig"
-                    ),
-                    file_name=(
-                        f"{key}_{title}.csv"
-                    ),
+                    data=frame.to_csv().encode("utf-8-sig"),
+                    file_name=f"{key}_{title}.csv",
                     mime="text/csv",
-                    key=(
-                        key
-                        + "_"
-                        + title
-                        + "_download"
-                    ),
+                    key=key + "_" + title + "_download",
                 )
 
     st.caption(
-        "The bottom average row uses daily numeric "
-        "observations within the selected dates, "
-        "not an equal-weight mean of monthly "
-        "averages. Missing values are excluded; "
-        "zero and negative prices are included."
+        "The bottom average row uses daily numeric observations "
+        "over the selected dates. Monthly averages use only "
+        "dates inside that same range. Missing prices are "
+        "excluded; zero and negative prices are included."
     )
 
 
-st.title(
-    "Natural Gas Pricing Analysis"
-)
+st.title("Natural Gas Pricing Analysis")
 
 section = st.sidebar.radio(
     "Dataset",
-    [
+    options=[
         "ICE settlements",
         "NG Swing GDD master output",
     ],
 )
 
-if st.sidebar.button(
-    "Reload available data"
-):
+if st.sidebar.button("Reload available data"):
     st.cache_data.clear()
     st.rerun()
 
 st.sidebar.caption(
-    "Reload clears this app's cache. "
-    "GitHub updates must first reach "
-    "the deployed app."
+    "Reload clears cached data. Repository updates must "
+    "first reach the deployed app."
 )
 
 
-# -------------------------------------------------
-# NG SWING GDD MASTER OUTPUT
-# -------------------------------------------------
+# =================================================
+# MASTER OUTPUT
+# =================================================
 
 if section == "NG Swing GDD master output":
     paths = sorted(
@@ -483,129 +432,92 @@ if section == "NG Swing GDD master output":
     )
 
     if not paths:
-        st.error(
-            "No CSV files found in master."
-        )
+        st.error("No CSV files found in master.")
         st.stop()
 
     preferred = next(
         (
             path
             for path in paths
-            if path.name.startswith(
-                "master_ng_swing_gdd"
-            )
+            if path.name.startswith("master_ng_swing_gdd")
         ),
         paths[0],
     )
 
     path = st.sidebar.selectbox(
         "Master file",
-        options=paths,
+        paths,
         index=paths.index(preferred),
-        format_func=lambda selected_path: str(
-            selected_path.relative_to(ROOT)
-        ),
+        format_func=lambda p: str(p.relative_to(ROOT)),
     )
 
     try:
-        dataframe = read_master(
-            file_signature(path)
-        )
-
+        data = read_master(file_signature(path))
     except Exception as error:
         st.error(str(error))
         st.stop()
 
-    st.header(
-        "NG Swing GDD master output"
-    )
+    st.header("NG Swing GDD master output")
 
     st.caption(
-        "Source: "
-        + str(path.relative_to(ROOT))
-        + ". Values may include modeled dates; "
-        "the file does not identify actual "
-        "versus modeled records."
+        f"Source: {path.relative_to(ROOT)}. "
+        "The file does not distinguish actual from modeled "
+        "values or identify historical run dates."
     )
 
     start, end = date_controls(
-        dataframe.index.min(),
-        dataframe.index.max(),
-        "master",
+        data.index.min(),
+        data.index.max(),
+        "master_dates",
     )
 
     defaults = [
-        column
-        for column in [
-            "HSC",
-            "Henry",
-            "Waha",
-            "TETCO-M3",
-        ]
-        if column in dataframe.columns
+        hub
+        for hub in ["HSC", "Henry", "Waha", "TETCO-M3"]
+        if hub in data.columns
     ]
 
     hubs = st.sidebar.multiselect(
-        "Hubs",
-        options=dataframe.columns.tolist(),
-        default=(
-            defaults
-            or dataframe.columns[:1].tolist()
-        ),
+        "Master-output hubs",
+        data.columns.tolist(),
+        default=defaults or data.columns[:1].tolist(),
     )
 
     if not hubs:
-        st.info(
-            "Select at least one hub."
-        )
+        st.info("Select at least one hub.")
         st.stop()
 
-    selected = dataframe.loc[
-        (
-            dataframe.index
-            >= pd.Timestamp(start)
-        )
-        & (
-            dataframe.index
-            <= pd.Timestamp(end)
-        ),
+    selected = data.loc[
+        (data.index >= pd.Timestamp(start))
+        & (data.index <= pd.Timestamp(end)),
         hubs,
     ]
 
     st.caption(
-        "Each hub has its own selected-period "
-        "average. Different hubs are not "
-        "blended into one price."
+        "Each selected hub retains its own average."
     )
 
-    report(
+    show_report(
         selected,
-        "master",
+        key="master",
         metric_label="Master output value",
     )
 
 
-# -------------------------------------------------
+# =================================================
 # ICE SETTLEMENTS
-# -------------------------------------------------
+# =================================================
 
 else:
-    catalog_path = (
-        ARCHIVE / "catalog.parquet"
-    )
-
-    manifest_path = (
-        ARCHIVE / "manifest.json"
-    )
+    catalog_path = ARCHIVE / "catalog.parquet"
+    manifest_path = ARCHIVE / "manifest.json"
 
     if (
         not catalog_path.exists()
         or not manifest_path.exists()
     ):
         st.info(
-            "Run the Prepare ICE Pricing Archive "
-            "workflow in GitHub first."
+            "Run Prepare ICE Pricing Archive in GitHub first."
         )
         st.stop()
 
@@ -613,175 +525,139 @@ else:
         catalog = read_catalog(
             file_signature(catalog_path)
         )
-
     except Exception as error:
         st.error(str(error))
         st.stop()
 
     if catalog.empty:
-        st.warning(
-            "The ICE instrument catalog is empty."
-        )
+        st.warning("The instrument catalog is empty.")
         st.stop()
 
-    st.header(
-        "ICE settlements"
-    )
+    st.header("ICE settlements")
 
     st.caption(
-        f"{catalog['product'].nunique():,} products "
-        f"and {catalog['contract'].nunique():,} "
-        "ICE codes available. Choose a product "
-        "first, then its hub and matching code."
+        f"{catalog['product'].nunique():,} products and "
+        f"{catalog['contract'].nunique():,} ICE codes available."
     )
 
-    st.sidebar.header(
-        "Select product and hub"
+    st.sidebar.header("Products and hubs")
+
+    st.sidebar.caption(
+        "Empty filters include all available values. "
+        "Select products and hubs before retrieving prices."
     )
 
-    # Product is the first selection.
-    products = sorted(
-        catalog["product"]
-        .dropna()
-        .unique()
-        .tolist()
+    selected_catalog = multi_filter(
+        catalog,
+        "product",
+        "Products",
+        "ice_products",
     )
 
-    product = st.sidebar.selectbox(
-        "Product",
-        options=products,
-        key="product_first",
-        help=(
-            "Type part of the product description "
-            "to search the dropdown."
-        ),
+    selected_catalog = multi_filter(
+        selected_catalog,
+        "hub",
+        "Hubs",
+        "ice_hubs",
     )
 
-    product_catalog = catalog[
-        catalog["product"].eq(product)
-    ].copy()
-
-    # Hub is filtered by the chosen product.
-    hubs = sorted(
-        product_catalog["hub"]
-        .dropna()
-        .unique()
-        .tolist()
+    selected_catalog = multi_filter(
+        selected_catalog,
+        "contract",
+        "ICE codes — optional",
+        "ice_codes",
     )
 
-    hub = st.sidebar.selectbox(
-        "Hub",
-        options=hubs,
-        key="product_first_hub",
-    )
-
-    hub_catalog = product_catalog[
-        product_catalog["hub"].eq(hub)
-    ].copy()
-
-    # Only matching codes are offered.
-    codes = sorted(
-        hub_catalog["contract"]
-        .dropna()
-        .unique()
-        .tolist()
-    )
-
-    code = st.sidebar.selectbox(
-        "Matching ICE code",
-        options=codes,
-        key="product_first_code",
-        help=(
-            "Only codes associated with the "
-            "selected product and hub appear."
-        ),
-    )
-
-    code_catalog = hub_catalog[
-        hub_catalog["contract"].eq(code)
-    ].copy()
-
-    selected_catalog = code_catalog.copy()
-
-    selected_catalog = filter_catalog(
+    selected_catalog = multi_filter(
         selected_catalog,
         "contract_type",
-        "Contract type",
-        key="ice_type",
+        "Contract types — optional",
+        "ice_types",
     )
 
-    selected_catalog = filter_catalog(
+    selected_catalog = multi_filter(
         selected_catalog,
         "strike",
-        "Strike, if applicable",
-        key="ice_strike",
+        "Strikes — optional",
+        "ice_strikes",
     )
 
-    strips = sorted(
+    if selected_catalog.empty:
+        st.info("No instruments match these filters.")
+        st.stop()
+
+    st.subheader("Trading-date range")
+
+    # Bounds use the full archive, independently of
+    # product, hub, and delivery-period selections.
+    trade_start, trade_end = date_controls(
+        catalog["first_trade_date"].min(),
+        catalog["last_trade_date"].max(),
+        "ice_trade_dates",
+        "First trade date",
+        "Last trade date",
+    )
+
+    st.subheader("Delivery-period range")
+
+    delivery_start, delivery_end = date_controls(
+        selected_catalog["strip"].min(),
+        selected_catalog["strip"].max(),
+        "ice_delivery_dates",
+        "First delivery date",
+        "Last delivery date",
+    )
+
+    selected_catalog = selected_catalog[
+        selected_catalog["strip"].between(
+            pd.Timestamp(delivery_start),
+            pd.Timestamp(delivery_end),
+        )
+    ].copy()
+
+    available_strips = sorted(
         selected_catalog["strip"]
         .dropna()
         .unique()
         .tolist()
     )
 
-    chosen_strips = st.sidebar.multiselect(
-        "Delivery strips",
-        options=strips,
-        default=strips[:1],
-        format_func=lambda date: (
-            pd.Timestamp(date).strftime(
-                "%b %d, %Y"
-            )
+    specific_key = "ice_specific_strips"
+
+    if specific_key in st.session_state:
+        st.session_state[specific_key] = [
+            value
+            for value in st.session_state[specific_key]
+            if value in available_strips
+        ]
+
+    specific_strips = st.multiselect(
+        "Optional: select specific delivery dates within this range",
+        options=available_strips,
+        key=specific_key,
+        format_func=lambda value: (
+            pd.Timestamp(value).strftime("%b %d, %Y")
         ),
         help=(
-            "Select one or more delivery periods. "
-            "Clear the selection to include "
-            "all available strips."
+            "Leave empty to include every available delivery "
+            "date between the delivery start and end dates."
         ),
     )
 
-    if chosen_strips:
+    if specific_strips:
         selected_catalog = selected_catalog[
-            selected_catalog["strip"].isin(
-                chosen_strips
-            )
+            selected_catalog["strip"].isin(specific_strips)
         ]
 
     if selected_catalog.empty:
         st.info(
-            "No instruments match these filters."
+            "No delivery strips match this range."
         )
         st.stop()
 
-    # Stable date bounds for the selected
-    # product, hub, and code.
-    date_key = (
-        "ice_dates_"
-        + str(
-            products.index(product)
-        )
-        + "_"
-        + str(hubs.index(hub))
-        + "_"
-        + code
-    )
-
-    start, end = date_controls(
-        code_catalog[
-            "first_trade_date"
-        ].min(),
-        code_catalog[
-            "last_trade_date"
-        ].max(),
-        date_key,
-    )
-
     metric_label = st.sidebar.selectbox(
         "Price field",
-        options=[
-            "Settlement price",
-            "Net change",
-        ],
+        ["Settlement price", "Net change"],
     )
 
     metric = (
@@ -791,157 +667,188 @@ else:
     )
 
     st.caption(
-        f"Product: {product} | "
-        f"Hub: {hub} | "
-        f"ICE code: {code}"
+        f"{len(selected_catalog):,} instrument identities selected | "
+        f"{selected_catalog['product'].nunique():,} products | "
+        f"{selected_catalog['hub'].nunique():,} hubs | "
+        f"{selected_catalog['strip'].nunique():,} delivery dates."
     )
 
-    with st.spinner(
-        "Retrieving selected pricing..."
+    # Display one contract family at a time to keep broad
+    # multi-product selections responsive.
+    families = (
+        selected_catalog[FAMILY]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+    family_labels = [
+        " | ".join(
+            f"{column}: {value}"
+            for column, value in zip(FAMILY, row)
+            if pd.notna(value) and str(value) != ""
+        )
+        for row in families.itertuples(
+            index=False,
+            name=None,
+        )
+    ]
+
+    # An explicit button prevents querying the archive
+    # after every intermediate filter edit.
+    selection_signature = (
+        file_signature(manifest_path),
+        tuple(
+            instrument_tuple(row)
+            for row in selected_catalog[
+                IDENTITY
+            ].itertuples(index=False, name=None)
+        ),
+        str(trade_start),
+        str(trade_end),
+    )
+
+    if st.button(
+        "Apply filters and load prices",
+        type="primary",
     ):
+        st.session_state["active_ice_selection"] = (
+            selection_signature
+        )
+
+    if (
+        st.session_state.get("active_ice_selection")
+        != selection_signature
+    ):
+        st.info(
+            "Set your filters, then click "
+            "Apply filters and load prices."
+        )
+        st.stop()
+
+    family_position = st.selectbox(
+        "Product / hub / contract group to display",
+        options=list(range(len(families))),
+        format_func=lambda position: family_labels[position],
+        help=(
+            "All selected groups are available here. "
+            "Each group has its own prices, strip average, "
+            "and average rows."
+        ),
+    )
+
+    family_row = families.iloc[family_position]
+    family_catalog = selected_catalog.copy()
+
+    for column in FAMILY:
+        value = family_row[column]
+
+        if pd.isna(value):
+            family_catalog = family_catalog[
+                family_catalog[column].isna()
+            ]
+        else:
+            family_catalog = family_catalog[
+                family_catalog[column].eq(value)
+            ]
+
+    instruments = tuple(
+        instrument_tuple(row)
+        for row in family_catalog[
+            IDENTITY
+        ].drop_duplicates().itertuples(
+            index=False,
+            name=None,
+        )
+    )
+
+    with st.spinner("Retrieving selected pricing..."):
         try:
             data = query_prices(
                 file_signature(manifest_path),
-                code,
-                product,
-                hub,
-                start,
-                end,
+                instruments,
+                trade_start,
+                trade_end,
             )
-
         except Exception as error:
             st.error(str(error))
             st.stop()
 
-    data = data.merge(
-        selected_catalog[
-            IDENTITY
-        ].drop_duplicates(),
-        on=IDENTITY,
-        how="inner",
-        validate="many_to_one",
-    )
-
     if data.empty:
         st.info(
-            "No prices match these dates "
-            "and instruments."
+            "This group has no records within the "
+            "selected trading-date range."
         )
         st.stop()
 
-    # Identical records in multiple source files
-    # count once in the pricing calculations.
-    # The archive builder rejects conflicts.
     records = data.drop_duplicates(
         ["trade_date"] + IDENTITY
+    ).copy()
+
+    st.subheader(
+        family_labels[family_position]
     )
+
+    # Use the catalog, not only returned prices, to retain
+    # delivery columns with no observations in this date range.
+    expiry_counts = (
+        family_catalog.groupby("strip")[
+            "expiration_date"
+        ]
+        .nunique(dropna=False)
+    )
+
+    multiple_expirations = expiry_counts.gt(1).any()
+
+    def delivery_labels(frame):
+        labels = frame["strip"].dt.strftime("%Y-%m-%d")
+
+        if multiple_expirations:
+            labels = (
+                labels
+                + " | expires "
+                + frame["expiration_date"]
+                .dt.strftime("%Y-%m-%d")
+                .fillna("unspecified")
+            )
+
+        return labels
+
+    records["delivery_column"] = delivery_labels(records)
+
+    expected_columns = sorted(
+        delivery_labels(family_catalog).unique().tolist()
+    )
+
+    if records.duplicated(
+        ["trade_date", "delivery_column"]
+    ).any():
+        st.error(
+            "Multiple instruments map to one price-table cell."
+        )
+        st.stop()
+
+    wide = records.pivot(
+        index="trade_date",
+        columns="delivery_column",
+        values=metric,
+    )
+
+    wide.columns.name = None
 
     st.caption(
-        f"{len(records):,} unique matching "
-        "pricing records."
+        f"{len(records):,} unique pricing records. "
+        "Strip averages equally weight the displayed delivery "
+        "columns. Products, hubs, contract types, and strikes "
+        "are kept separate."
     )
 
-    groups = records.groupby(
-        FAMILY,
-        dropna=False,
-        observed=True,
-        sort=True,
+    show_report(
+        wide,
+        key="ice_report_" + str(family_position),
+        metric_label=metric_label,
+        strip_average=True,
+        expected_columns=expected_columns,
     )
-
-    if groups.ngroups > 20:
-        st.info(
-            "More than 20 contract groups "
-            "selected. Narrow contract type "
-            "or strike filters."
-        )
-
-    else:
-        for position, (
-            labels,
-            group,
-        ) in enumerate(groups):
-            if not isinstance(
-                labels,
-                tuple,
-            ):
-                labels = (labels,)
-
-            title = " | ".join(
-                f"{name}: {value}"
-                for name, value in zip(
-                    FAMILY,
-                    labels,
-                )
-                if (
-                    pd.notna(value)
-                    and str(value) != ""
-                )
-            )
-
-            st.subheader(title)
-
-            group = group.copy()
-
-            multiple_expirations = (
-                group.groupby("strip")[
-                    "expiration_date"
-                ]
-                .nunique(dropna=False)
-                .gt(1)
-                .any()
-            )
-
-            group["column"] = (
-                group["strip"]
-                .dt.strftime("%Y-%m-%d")
-            )
-
-            if multiple_expirations:
-                group["column"] += (
-                    " | expires "
-                    + group[
-                        "expiration_date"
-                    ]
-                    .dt.strftime("%Y-%m-%d")
-                    .fillna("unspecified")
-                )
-
-            if group.duplicated(
-                [
-                    "trade_date",
-                    "column",
-                ]
-            ).any():
-                st.error(
-                    "Multiple instrument identities "
-                    "map to one table cell. "
-                    "Narrow the filters."
-                )
-                continue
-
-            wide = group.pivot(
-                index="trade_date",
-                columns="column",
-                values=metric,
-            )
-
-            wide.columns.name = None
-
-            st.caption(
-                metric_label
-                + ". Selected-strip averages "
-                "equally weight the displayed "
-                "delivery columns. Different "
-                "products, hubs, contract types, "
-                "and strikes remain separate."
-            )
-
-            report(
-                wide,
-                key=f"ice_{position}",
-                strip_average=True,
-                metric_label=metric_label,
-            )
 
     with st.expander(
         "Underlying records and source files"
@@ -954,15 +861,13 @@ else:
 
         if st.checkbox(
             "Prepare underlying-records CSV",
-            key="underlying_prepare",
+            key="ice_raw_prepare",
         ):
             st.download_button(
                 "Download underlying records",
                 data=data.to_csv(
                     index=False
                 ).encode("utf-8-sig"),
-                file_name=(
-                    "ice_underlying_records.csv"
-                ),
+                file_name="ice_underlying_records.csv",
                 mime="text/csv",
             )

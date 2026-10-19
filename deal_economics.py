@@ -100,7 +100,7 @@ def deal_summary(result, annual_discount=0.10, initial_investment=0., terminal_r
 
 
 ROOT=Path(__file__).resolve().parent
-st.set_page_config(page_title='REM | Deal Economics',layout='wide')
+st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
 st.title('Riverbend Energy Management')
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
 summary_panel=st.container()
@@ -113,7 +113,8 @@ def load_location(path): return read_prices(path)
 defaults=dict(customer='New customer', start=str(pd.Timestamp.today().to_period('M').to_timestamp().date()), transport=.35, broker=.30, margin=.18, usage={m:1700. for m in range(1,13)})
 prices=None
 if (ROOT/'data/rempr.xlsx').exists():
-    prices,defaults=bundled()
+    with st.spinner('Reading included pricing workbook…'):
+        prices,defaults=bundled()
 @st.cache_data(ttl=60)
 def repository_files():
     # Restrict discovery to the app repository and omit hidden/dependency folders.

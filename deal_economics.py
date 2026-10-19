@@ -103,6 +103,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
 st.title('Riverbend Energy Management')
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
+st.info('Build REM-1052 • Select a pricing file below, then click Load selected pricing file.')
 summary_panel=st.container()
 
 @st.cache_data
@@ -112,17 +113,16 @@ def load_location(path): return read_prices(path)
 
 defaults=dict(customer='New customer', start=str(pd.Timestamp.today().to_period('M').to_timestamp().date()), transport=.35, broker=.30, margin=.18, usage={m:1700. for m in range(1,13)})
 prices=None
-if (ROOT/'data/rempr.xlsx').exists():
-    with st.spinner('Reading included pricing workbook…'):
-        prices,defaults=bundled()
+
 @st.cache_data(ttl=60)
 def repository_files():
     # Restrict discovery to the app repository and omit hidden/dependency folders.
     excluded={'venv','env','node_modules','__pycache__','site-packages'}
     files=[]
-    for path in ROOT.rglob('*'):
-        relative=path.relative_to(ROOT)
-        if any(part.startswith('.') or part in excluded for part in relative.parts): continue
-        if path.is_file() and path.suffix.lower() in {'.xlsx','.csv','.parquet'}:
-            files.append(str(relative))
+    for directory,subdirs,names in os.walk(ROOT):
+        subdirs[:]=[d for d in subdirs if not d.startswith('.') and d not in excluded and not (Path(directory)/d).is_symlink()]
+        for name in names:
+            path=Path(directory)/name
+            if path.suffix.lower() in {'.xlsx','.csv','.parquet'}:
+                files.append(str(path.relative_to(ROOT)))
     return sorted(files,key=lambda name: ('ice' not in name.lower(),name.lower()))

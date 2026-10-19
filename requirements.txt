@@ -1,2 +1,5 @@
-pandas
-openpyxl
+streamlit>=1.40,<2
+pandas>=2.2,<3
+numpy>=1.26,<3
+openpyxl>=3.1,<4
+pyarrow>=17,<30

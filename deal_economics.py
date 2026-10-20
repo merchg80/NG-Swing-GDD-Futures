@@ -170,6 +170,64 @@ def build_summary_pdf(meta, summary, result, scenarios):
     SimpleDocTemplate(buffer,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=36,bottomMargin=50,title='Riverbend Deal Economics',author='Riverbend Energy Management').build(story,onFirstPage=footer,onLaterPages=footer)
     return buffer.getvalue()
 
+"""Durable named workstreams in a private GitHub repository."""
+import base64
+import json
+import re
+import uuid
+from datetime import datetime, timezone
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
+
+class WorkstreamError(ValueError): pass
+
+def github_request(repo,token,path='',method='GET',body=None):
+    if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',repo): raise WorkstreamError('Set WORKSTREAM_REPO to owner/private-repository.')
+    url=f'https://api.github.com/repos/{repo}'+path
+    headers={'Accept':'application/vnd.github+json','Authorization':f'Bearer {token}','X-GitHub-Api-Version':'2022-11-28','User-Agent':'REM-Deal-Economics'}
+    data=None if body is None else json.dumps(body,allow_nan=False).encode()
+    try:
+        with urlopen(Request(url,data=data,headers=headers,method=method),timeout=20) as response:return json.load(response)
+    except HTTPError as e:
+        if e.code==404: raise WorkstreamError('Not found. Check the private repository, branch and token access.') from None
+        if e.code in [409,422]: raise WorkstreamError('Save conflict: reopen the current saved version or save a new workstream.') from None
+        raise WorkstreamError(f'GitHub request failed (HTTP {e.code}). Check token permissions or expiry.') from None
+    except (URLError,TimeoutError):raise WorkstreamError('Unable to reach saved-workstream storage. Your current inputs remain on screen.') from None
+
+def verify_private(repo,token):
+    info=github_request(repo,token)
+    if not info.get('private'): raise WorkstreamError('Use a private repository for saved customer economics. WORKSTREAM_REPO currently points to a public repository.')
+
+def list_workstreams(repo,token,branch='main'):
+    verify_private(repo,token)
+    try:items=github_request(repo,token,'/contents/workstreams?ref='+quote(branch,safe=''))
+    except WorkstreamError as e:
+        if str(e).startswith('Not found'):return []
+        raise
+    return sorted([x for x in items if x.get('type')=='file' and x['name'].endswith('.json')],key=lambda x:x['name'].lower())
+
+def load_workstream(repo,token,path,branch='main'):
+    if not re.fullmatch(r'workstreams/[A-Za-z0-9_.-]+\.json',path):raise WorkstreamError('Invalid saved workstream path.')
+    item=github_request(repo,token,'/contents/'+path+'?ref='+quote(branch,safe=''))
+    payload=json.loads(base64.b64decode(item['content']))
+    if payload.get('schema_version')!=1: raise WorkstreamError('Unsupported workstream version.')
+    return payload,item['sha']
+
+def save_workstream(repo,token,name,snapshot,branch='main',path=None,sha=None):
+    verify_private(repo,token)
+    if not name.strip():raise WorkstreamError('Enter a workstream name.')
+    if path is None:
+        slug=re.sub('[^a-z0-9]+','-',name.lower()).strip('-')[:60] or 'deal'
+        path=f'workstreams/{slug}-{uuid.uuid4().hex[:10]}.json'
+    if not re.fullmatch(r'workstreams/[A-Za-z0-9_.-]+\.json',path):raise WorkstreamError('Invalid saved workstream path.')
+    if sha is None and snapshot.get('_existing'):raise WorkstreamError('Reopen the saved workstream before updating it.')
+    payload=dict(snapshot,schema_version=1,name=name.strip(),saved_at=datetime.now(timezone.utc).isoformat())
+    body=dict(message='Save deal workstream: '+name.strip(),branch=branch,content=base64.b64encode(json.dumps(payload,indent=2,allow_nan=False).encode()).decode())
+    if sha:body['sha']=sha
+    response=github_request(repo,token,'/contents/'+path,'PUT',body)
+    return path,response['content']['sha'],payload
+
 
 ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
@@ -185,7 +243,89 @@ h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#153449;}
 </style>""",unsafe_allow_html=True)
 st.title('Riverbend Energy Management')
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build REM-OFFERS-1020')
+st.caption('Pricing: GitHub input folder | Build REM-WORKSTREAMS-1020')
+def workstream_config():
+    def setting(name,default=''):
+        try:return str(st.secrets.get(name,os.getenv(name,default)))
+        except Exception:return os.getenv(name,default)
+    return setting('WORKSTREAM_REPO'),setting('WORKSTREAM_GITHUB_TOKEN'),setting('WORKSTREAM_BRANCH','main')
+
+ws_repo,ws_token,ws_branch=workstream_config()
+if '_pending_workstream' in st.session_state:
+    pending=st.session_state.pop('_pending_workstream')
+    st.session_state.pop('_current_snapshot',None)
+    for k in list(st.session_state):
+        if k.startswith(('wk_','offer_mode_','offer_override_','usage_')):del st.session_state[k]
+    for k,v in pending.get('widgets',{}).items():
+        if k.startswith(('wk_','offer_mode_','offer_override_')):
+            if k in ['wk_start','wk_due']:v=pd.Timestamp(v).date() if v else None
+            if k.startswith('wk_component_'):v=tuple(v)
+            st.session_state[k]=v
+    st.session_state['_restored_usage']=pending.get('usage',[])
+    st.session_state['_saved_pricing_file']=pending.get('pricing_file')
+    st.session_state['_saved_trade_date']=pending.get('trade_date')
+    st.session_state['_restore_pricing']=True
+    st.session_state['ws_latest']=bool(pending.get('latest_pricing',False))
+    st.session_state['ws_name']=pending['name']
+
+def save_current_workstream(copy=False):
+    try:
+        snapshot=st.session_state.get('_current_snapshot')
+        if not snapshot:raise WorkstreamError('Load pricing and enter deal assumptions before saving.')
+        path,sha,payload=save_workstream(ws_repo,ws_token,st.session_state.get('ws_name',''),snapshot,ws_branch,None if copy else st.session_state.get('_ws_path'),None if copy else st.session_state.get('_ws_sha'))
+        st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
+        st.session_state['_saved_message']='Saved '+payload['name']+' at '+payload['saved_at']
+        st.session_state['_last_saved_snapshot']=snapshot
+    except Exception as e:st.session_state['_save_error']=str(e)
+
+def open_workstream(path):
+    try:
+        payload,sha=load_workstream(ws_repo,ws_token,path,ws_branch)
+        st.session_state['_pending_workstream']=payload
+        st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
+        st.session_state['_saved_message']='Opened '+payload['name']+' | saved '+payload.get('saved_at','')
+    except Exception as e:st.session_state['_save_error']=str(e)
+
+with st.container(border=True):
+    st.subheader('Saved workstreams')
+    st.caption('Save a named working deal across browser refreshes and days. Saving is explicit; pricing updates do not change the saved assumptions until you save again.')
+    st.text_input('Workstream name',key='ws_name',placeholder='Customer - December 2026 evaluation')
+    if not ws_repo or not ws_token:
+        st.info('One-time setup: configure a private workstream repository and GitHub token in Streamlit Secrets to enable durable Save / Open. See the included setup guide.')
+    else:
+        if st.checkbox('Show saved workstreams',key='ws_show'):
+            try:
+                saved=list_workstreams(ws_repo,ws_token,ws_branch)
+                if saved:
+                    selected=st.selectbox('Saved workstream',saved,format_func=lambda x:x['name'])
+                    st.button('Open saved workstream',on_click=open_workstream,args=(selected['path'],))
+                else:st.caption('No saved workstreams yet. Save the current deal below.')
+            except Exception as e:st.error(str(e))
+        one,two=st.columns(2)
+        one.button('Save current workstream',on_click=save_current_workstream,disabled='_current_snapshot' not in st.session_state)
+        two.button('Save as new workstream',on_click=save_current_workstream,args=(True,),disabled='_current_snapshot' not in st.session_state)
+    if '_saved_message' in st.session_state:st.success(st.session_state['_saved_message'])
+    if '_save_error' in st.session_state:st.error(st.session_state.pop('_save_error'))
+    backup=st.file_uploader('Restore a workstream backup (optional; not pricing)',type=['json'],key='ws_backup')
+    if backup is not None and st.button('Open backup workstream'):
+        try:
+            import json
+            payload=json.loads(backup.getvalue())
+            if payload.get('schema_version')!=1:raise ValueError('Unsupported backup version')
+            st.session_state['_pending_workstream']=payload
+            st.session_state.pop('_ws_path',None);st.session_state.pop('_ws_sha',None)
+            st.rerun()
+        except Exception as e:st.error(str(e))
+    st.checkbox('Use latest available pricing file',key='ws_latest',help='Uses the newest date in an ICE filename, falling back to file modified time. Deal assumptions and manual offers remain unchanged.')
+    def refresh_latest_pricing():
+        st.session_state['ws_latest']=True
+        st.session_state['_restore_pricing']=True
+        st.session_state['_saved_trade_date']=None
+        st.session_state.pop('loaded_pricing_stamp',None)
+        st.session_state.pop('wk_asof',None)
+        st.session_state.pop('wk_pricing_file',None)
+    st.button('Refresh latest pricing',on_click=refresh_latest_pricing)
+
 summary_panel=st.container()
 
 def format_table(df):
@@ -222,9 +362,25 @@ with st.expander('1. Select ICE pricing file and contract dates', expanded=True)
     if not available:
         st.warning('The input folder contains no supported pricing files (.xlsx, .csv or .parquet).')
         st.stop()
-    selected_path=st.selectbox('ICE Cleared Gas pricing file',available,format_func=lambda p:str(p.relative_to(INPUT_DIR)))
+    import re
+    def pricing_recency(path):
+        match=re.search(r'(20\d{2})[-_](\d{2})[-_](\d{2})',path.name)
+        try:return (pd.Timestamp('-'.join(match.groups())).timestamp() if match else path.stat().st_mtime,path.name)
+        except ValueError:return (path.stat().st_mtime,path.name)
+    names=[str(p.relative_to(INPUT_DIR)) for p in available]
+    if st.session_state.get('ws_latest'):
+        ice_files=[p for p in available if 'ice' in p.name.lower()]
+        desired=str(max(ice_files or available,key=pricing_recency).relative_to(INPUT_DIR))
+    else:desired=st.session_state.get('_saved_pricing_file')
+    if desired and desired in names and (st.session_state.get('_restore_pricing') or st.session_state.get('ws_latest')):
+        st.session_state['wk_pricing_file']=desired
+    if st.session_state.get('wk_pricing_file') not in names:st.session_state.pop('wk_pricing_file',None)
+    selected_name=st.selectbox('ICE Cleared Gas pricing file',names,key='wk_pricing_file')
+    selected_path=INPUT_DIR/selected_name
     st.caption(f'Selected repository file: input/{selected_path.relative_to(INPUT_DIR)}')
     stamp=f'{selected_path}:{selected_path.stat().st_mtime_ns}'
+    if st.session_state.pop('_restore_pricing',False) or st.session_state.get('ws_latest'):
+        st.session_state['loaded_pricing_stamp']=stamp
     if st.button('Load selected pricing file',type='primary'):
         st.session_state['loaded_pricing_stamp']=stamp
     if st.session_state.get('loaded_pricing_stamp')!=stamp:
@@ -239,49 +395,59 @@ with st.expander('1. Select ICE pricing file and contract dates', expanded=True)
         st.caption('Select an ICE settlement file with trade date, hub, product, strip, contract and settlement price columns. A daily Date-by-hub master is not a monthly forward curve.')
         st.stop()
     dates=sorted(prices.trade_date.unique(),reverse=True)
-    asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'))
+    saved_date=st.session_state.get('_saved_trade_date')
+    if saved_date and not st.session_state.get('ws_latest') and pd.Timestamp(saved_date) in dates:st.session_state.setdefault('wk_asof',pd.Timestamp(saved_date))
+    if st.session_state.get('ws_latest'):st.session_state['wk_asof']=dates[0]
+    if st.session_state.get('wk_asof') not in dates:st.session_state.pop('wk_asof',None)
+    asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'),key='wk_asof')
     st.caption('All components use this exact trade date. Missing months block a quote.')
-    customer=st.text_input('Customer',value=defaults['customer'])
-    broker_name=st.text_input('Broker name / firm',value='')
-    offer_due=st.date_input('Offer due date',value=None)
-    start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date())
+    customer=st.text_input('Customer',value=defaults['customer'],key='wk_customer')
+    broker_name=st.text_input('Broker name / firm',value='',key='wk_broker_name')
+    offer_due=st.date_input('Offer due date',value=None,key='wk_due')
+    start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date(),key='wk_start')
     start=start_entered.replace(day=1)
     if start_entered.day!=1: st.caption('Monthly pricing uses the start month. Enter first-month usage for the remaining delivery days; usage is not automatically prorated.')
-    term=st.slider('Term (months)',min_value=1,max_value=48,value=12,step=1)
+    term=st.slider('Term (months)',min_value=1,max_value=48,value=12,step=1,key='wk_term')
 
 st.subheader('Market components')
 st.caption('Choose products by name. Additive mode follows the workbook: Henry Hub + HSC basis + HSC index adjustment. Outright mode uses one full-price product.')
-kind=st.radio('Curve construction',['Additive components','Outright fixed price'],horizontal=True)
+kind=st.radio('Curve construction',['Additive components','Outright fixed price'],horizontal=True,key='wk_kind')
 options=list(prices[['hub','product','contract']].drop_duplicates().itertuples(index=False,name=None))
 selections=[]
 cols=st.columns(3 if kind=='Additive components' else 1)
 for i,c in enumerate(cols):
     preferred=['H','HXS','SHS'][i] if kind=='Additive components' else 'H'
     idx=next((j for j,x in enumerate(options) if x[2]==preferred),0)
-    selections.append(c.selectbox(f'Component {i+1}',options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})'))
+    if st.session_state.get(f'wk_component_{i}') not in options:
+        if st.session_state.get(f'wk_component_{i}') is not None:st.warning(f'Saved component {i+1} is not in this pricing file. Review the replacement selection before quoting.')
+        st.session_state.pop(f'wk_component_{i}',None)
+    selections.append(c.selectbox(f'Component {i+1}',options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'wk_component_{i}'))
 if len(set(selections))!=len(selections): st.error('Select distinct components.');st.stop()
 st.subheader('Deal assumptions')
 a,b,c,d=st.columns(4)
-transport=a.number_input('Upstream transport ($/delivered MMBtu)',min_value=0.,value=defaults['transport'],step=.01,format='%.4f')
-broker=b.number_input('Brokerage ($/delivered MMBtu)',min_value=0.,value=defaults['broker'],step=.01,format='%.4f')
-margin=c.number_input('Target gross margin ($/MMBtu)',value=defaults['margin'],step=.01,format='%.4f')
-fuel=d.number_input('Supply fuel retention (%)',min_value=0.,max_value=99.,value=0.,step=.1)/100
+transport=a.number_input('Upstream transport ($/delivered MMBtu)',min_value=0.,value=defaults['transport'],step=.01,format='%.4f',key='wk_transport')
+broker=b.number_input('Brokerage ($/delivered MMBtu)',min_value=0.,value=defaults['broker'],step=.01,format='%.4f',key='wk_broker')
+margin=c.number_input('Target gross margin ($/MMBtu)',value=defaults['margin'],step=.01,format='%.4f',key='wk_margin')
+fuel=d.number_input('Supply fuel retention (%)',min_value=0.,max_value=99.,value=0.,step=.1,key='wk_fuel')/100
 st.caption('Margin is after supply, transport and brokerage, after the capital charge, before overhead, other credit fees and taxes. Transport and brokerage apply to delivered usage. Fuel gross-up applies to gas supply only.')
 st.subheader('Cost of capital')
 cap1,cap2=st.columns(2)
-capital_hurdle=cap1.number_input('Annual capital hurdle (%)',min_value=0.,value=8.,step=.5)/100
-financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.,step=1.)
+capital_hurdle=cap1.number_input('Annual capital hurdle (%)',min_value=0.,value=8.,step=.5,key='wk_capital')/100
+financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.,step=1.,key='wk_days')
 st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
 with st.expander('Upfront credit and investment returns',expanded=True):
     a,b,c=st.columns(3)
-    discount=a.number_input('Required annual discount rate (%)',min_value=0.,value=10.,step=.5,format='%.2f',help='Effective annual rate used for NPV. This is separate from the offer-price capital hurdle and does not change IRR.')/100
-    investment=b.number_input('Upfront cash posted for credit ($)',min_value=0.,value=0.,step=1000.,help='Cash collateral posted at contract start. Do not enter the face amount of an unfunded letter of credit.')
-    full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True)
-    recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',min_value=0.,value=0.,step=1000.)
+    discount=a.number_input('Required annual discount rate (%)',key='wk_discount',min_value=0.,value=10.,step=.5,format='%.2f',help='Effective annual rate used for NPV. This is separate from the offer-price capital hurdle and does not change IRR.')/100
+    investment=b.number_input('Upfront cash posted for credit ($)',key='wk_investment',min_value=0.,value=0.,step=1000.,help='Cash collateral posted at contract start. Do not enter the face amount of an unfunded letter of credit.')
+    full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True,key='wk_full_recovery')
+    recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',key='wk_recovery',min_value=0.,value=0.,step=1000.)
     c.caption(f'Credit cash recovered: ${recovery:,.0f}')
     st.caption('NPV is measured at contract start. Cash flows use month-end profit after the modeled capital charge, before overhead and taxes, less initial investment, plus terminal recovery. The upfront credit amount is a cash outflow at contract start. Credit cash is returned in the final month under the selected recovery assumption. Monthly profit is received at month-end. The posted credit cash is separate from the financing-days capital charge; no additional interest charge on collateral is added. IRR is annualized and requires an initial cash outflow.')
 months=pd.date_range(start,periods=term,freq='MS')
 base=pd.DataFrame({'month':months,'usage_mmbtu':[defaults['usage'].get(m.month,0.) for m in months]})
+if st.session_state.get('_restored_usage'):
+    saved_usage={pd.Timestamp(row['month']):float(row['usage_mmbtu']) for row in st.session_state['_restored_usage']}
+    base['usage_mmbtu']=[saved_usage.get(m,v) for m,v in zip(base.month,base.usage_mmbtu)]
 st.subheader('Customer monthly usage')
 st.caption('Enter total delivered MMBtu for each month. The attached workbook starts at 1,700 MMBtu/month. Values are estimates, not daily quantities.')
 usage_file=st.file_uploader('Load a saved usage schedule (optional)',type=['csv'])
@@ -341,8 +507,20 @@ with summary_panel:
         if term in [12,18,24,36,48]:
             quote=overrides.get(term)
         else:
-            custom_override=st.checkbox(f'Manual offer for selected {term}-month contract')
-            quote=st.number_input('Selected contract offer ($/MMBtu)',value=4.,step=.01,format='%.4f') if custom_override else None
+            custom_override=st.checkbox(f'Manual offer for selected {term}-month contract',key='wk_custom_override')
+            quote=st.number_input('Selected contract offer ($/MMBtu)',value=4.,step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
+import json
+widget_snapshot={}
+for k,v in st.session_state.items():
+    if k.startswith(('wk_','offer_mode_','offer_override_')) and k not in ['wk_pricing_file','wk_asof']:
+        if hasattr(v,'isoformat'):v=v.isoformat()
+        elif isinstance(v,tuple):v=list(v)
+        widget_snapshot[k]=v
+current_usage=[dict(month=str(pd.Timestamp(row.month).date()),usage_mmbtu=float(row.usage_mmbtu)) for row in usage.itertuples(index=False)]
+snapshot=dict(schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=bool(st.session_state.get('ws_latest')),name=st.session_state.get('ws_name',''))
+st.session_state['_current_snapshot']=snapshot
+with summary_panel:
+    st.download_button('Download workstream backup (JSON)',json.dumps(snapshot,indent=2,allow_nan=False).encode(),'REM_Workstream.json','application/json')
 try:
     p=curve(prices,asof,selections,months)
     if p.isna().any().any():

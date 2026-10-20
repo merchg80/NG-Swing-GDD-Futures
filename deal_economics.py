@@ -98,7 +98,7 @@ def deal_summary(result, annual_discount=0.10, initial_investment=0., terminal_r
                 contract_price=float(result.customer_rate.iloc[0]),npv=float(npv),irr=irr,irr_status=status,
                 spread=gp/volume,gross_margin=gp/revenue if revenue>0 else None)
 
-def standard_offers(prices, asof, selections, start, usage, fallback_profile, transport, broker, margin, fuel, capital_hurdle, financing_days):
+def standard_offers(prices, asof, selections, start, usage, fallback_profile, transport, broker, margin, fuel, capital_hurdle, financing_days, discount=0.10, investment=0., recovery=0., overrides=None):
     """Exact entered months first, then repeat first-year calendar-month estimates."""
     schedule=usage.copy()
     schedule['month']=pd.to_datetime(schedule['month'])
@@ -113,13 +113,14 @@ def standard_offers(prices, asof, selections, start, usage, fallback_profile, tr
         pricing=curve(prices,asof,selections,months)
         missing=int(pricing.isna().any(axis=1).sum())
         if missing:
-            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,projected_usage_months=projected,status=f'Unavailable: {missing} months missing settlements'))
+            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,npv=None,irr=None,discount_rate=discount,irr_status="Unavailable",projected_usage_months=projected,status=f'Unavailable: {missing} months missing settlements'))
             continue
         try:
-            result,offer=calculate(pricing,volumes,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days)
-            rows.append(dict(term_months=n,offer_price=offer,break_even=offer-margin,contract_volume=result.usage_mmbtu.sum(),contract_profit=result.gross_profit.sum(),projected_usage_months=projected,status='Available'))
+            result,offer=calculate(pricing,volumes,transport,broker,margin,fuel,fixed_quote=(overrides or {}).get(n),capital_hurdle=capital_hurdle,financing_days=financing_days)
+            returns=deal_summary(result,discount,investment,recovery)
+            rows.append(dict(term_months=n,target_price=offer,offer_price=float(result.customer_rate.iloc[0]),break_even=offer-margin,spread=result.gross_profit.sum()/result.usage_mmbtu.sum(),gross_margin=returns['gross_margin'],annual_revenue=returns['annual_revenue'],contract_volume=result.usage_mmbtu.sum(),contract_profit=result.gross_profit.sum(),npv=returns['npv'],irr=returns['irr'],discount_rate=discount,irr_status=returns['irr_status'],projected_usage_months=projected,status='Available'))
         except ValueError as e:
-            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,projected_usage_months=projected,status=str(e)))
+            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,npv=None,irr=None,discount_rate=discount,irr_status="Unavailable",projected_usage_months=projected,status=str(e)))
     return pd.DataFrame(rows)
 
 def build_summary_pdf(meta, summary, result, scenarios):
@@ -172,10 +173,32 @@ def build_summary_pdf(meta, summary, result, scenarios):
 
 ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
+st.markdown("""<style>
+.block-container {max-width:1550px;padding-top:2rem;}
+h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#153449;}
+[data-testid="stVerticalBlockBorderWrapper"] {border-color:#a6bdc9 !important;border-radius:12px;}
+[data-testid="stMetric"] {background:#f0f5f8;border:1px solid #d0dee5;border-radius:8px;padding:12px 6px;text-align:center;min-height:95px;}
+[data-testid="stMetricLabel"] {justify-content:center;font-size:.82rem;}
+[data-testid="stMetricValue"] {font-size:1.35rem;font-weight:600;color:#153449;}
+[data-testid="stMetricLabel"] p {font-size:.82rem;}
+[data-testid="stNumberInput"] input {text-align:center;}
+</style>""",unsafe_allow_html=True)
 st.title('Riverbend Energy Management')
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.info('Build REM-INPUT-1020 • Pricing comes directly from the GitHub input folder. No pricing upload needed.')
+st.caption('Pricing: GitHub input folder | Build REM-OFFERS-1020')
 summary_panel=st.container()
+
+def format_table(df):
+    formats={}
+    for name in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[name]): continue
+        key=str(name).lower()
+        if '%' in key: formats[name]='{:,.2f}%'
+        elif key in {'irr','gross_margin','discount_rate'}: formats[name]='{:.2%}'
+        elif any(t in key for t in ['price','profit','revenue','cost','rate','npv','spread','margin','capital','supply','broker','transport','offer','break_even']):
+            formats[name]='${:,.4f}' if any(t in key for t in ['price','rate','spread','break_even']) or '/mmbtu' in key else '${:,.0f}'
+        else: formats[name]='{:,.0f}'
+    return df.style.format(formats,na_rep='N/A')
 
 @st.cache_data(ttl=300)
 def load_location(path, modified_ns):
@@ -270,34 +293,67 @@ if usage_file is not None:
         base['usage_mmbtu']=base.month.map(loaded.set_index('month')['usage_mmbtu'])
         if base.usage_mmbtu.isna().any(): raise ValueError('Schedule must cover every selected month')
     except Exception as e: st.error(f'Invalid usage schedule: {e}');st.stop()
-usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True)},key=f'usage_{start}_{term}',use_container_width=True)
-manual=st.checkbox('Evaluate a proposed customer fixed price')
-quote=st.number_input('Proposed customer price ($/MMBtu)',value=4.,step=.01) if manual else None
-offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days)
+usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True,format='localized')},key=f'usage_{start}_{term}',use_container_width=True)
+offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery)
 with summary_panel:
     with st.container(border=True):
         st.subheader('Projected offers | standard contract terms')
         st.caption(f'Start: {start_entered:%b %d, %Y} • Target margin after capital: ${margin:.4f}/MMBtu • Settlements: {pd.Timestamp(asof):%Y-%m-%d}')
         st.caption(f'Shared assumptions: transport ${transport:.4f}/MMBtu | brokerage ${broker:.4f}/MMBtu | capital hurdle {capital_hurdle:.2%} | financing {financing_days:g} days | target margin ${margin:.4f}/MMBtu')
         offer_cols=st.columns(5)
+        overrides={}
+        output_panels=[]
         for col,row in zip(offer_cols,offers.itertuples(index=False)):
-            col.metric(f'{row.term_months} months',f'${row.offer_price:.4f}' if pd.notna(row.offer_price) else 'Unavailable')
-            col.caption('$/MMBtu' if row.status=='Available' else row.status)
-        st.caption('Each offer is a separately calculated fixed price including supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; any calendar months not entered use the displayed 1,700 MMBtu/month default. These are projected offers, independent of a manually entered customer price.')
+            with col:
+                with st.container(border=True):
+                    st.markdown(f'### {row.term_months} months')
+                    if row.status!='Available':
+                        st.warning(row.status)
+                        output_panels.append(None)
+                        continue
+                    st.caption(f'Model target: ${row.offer_price:,.4f}/MMBtu')
+                    setting=st.selectbox('Offer setting',['Model target','Target less $0.10','Target less $0.20','Manual price'],key=f'offer_mode_{row.term_months}')
+                    if setting=='Manual price':
+                        overrides[row.term_months]=st.number_input('Offer price ($/MMBtu)',value=float(row.offer_price),step=.01,format='%.4f',key=f'offer_override_{row.term_months}')
+                    elif setting!='Model target':
+                        overrides[row.term_months]=row.offer_price-(.1 if setting=='Target less $0.10' else .2)
+                    output_panels.append(st.container())
+        offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,overrides)
+        for panel,row in zip(output_panels,offers.itertuples(index=False)):
+            if panel is None: continue
+            with panel:
+                st.metric('Offer ($/MMBtu)',f'${row.offer_price:,.4f}')
+                st.metric(f'NPV @ {discount:.2%}',f'${row.npv:,.0f}' if pd.notna(row.npv) else 'N/A')
+                st.metric('Annualized IRR',f'{row.irr:.2%}' if pd.notna(row.irr) else 'N/A')
+                st.metric('Contract profit',f'${row.contract_profit:,.0f}')
+                st.metric('Spread ($/MMBtu)',f'${row.spread:,.4f}')
+                st.metric('Gross margin',f'{row.gross_margin:.2%}' if pd.notna(row.gross_margin) else 'N/A')
+        st.caption('Change each term independently. Model target follows the shared assumptions; manual prices remain as entered. Offer reductions are relative to the current model target.')
+        st.caption(f'Returns use ${investment:,.0f} upfront credit cash, ${recovery:,.0f} recovered at the end of each respective term, and a {discount:.2%} effective annual discount rate. NPV is valued at contract start; IRR is annualized.')
+        st.caption('Each offer is a separately calculated fixed price including supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; any calendar months not entered use the displayed 1,700 MMBtu/month default. Each term reflects its own offer setting above. For the selected contract term, that price also feeds the detailed summary, comparisons and PDF.')
         with st.expander('Standard offer detail and volume assumptions'):
-            st.dataframe(offers,hide_index=True,use_container_width=True)
+            st.dataframe(format_table(offers),hide_index=True,use_container_width=True)
         st.download_button('Download standard offers CSV',offers.to_csv(index=False).encode(),'standard_contract_offers.csv','text/csv')
+with summary_panel:
+    with st.container(border=True):
+        st.subheader('Detailed summary selection')
+        st.caption(f'The summary, monthly economics, offer comparisons and PDF below use the selected {term}-month contract. Change the contract term in the pricing setup to review another term.')
+        if term in [12,18,24,36,48]:
+            quote=overrides.get(term)
+        else:
+            custom_override=st.checkbox(f'Manual offer for selected {term}-month contract')
+            quote=st.number_input('Selected contract offer ($/MMBtu)',value=4.,step=.01,format='%.4f') if custom_override else None
 try:
     p=curve(prices,asof,selections,months)
     if p.isna().any().any():
         st.error('Pricing is missing for these delivery months/components. Select another trade date, product or term.')
-        st.dataframe(p[p.isna().any(axis=1)]);st.stop()
+        st.dataframe(p[p.isna().any(axis=1)].style.format('${:,.4f}',na_rep='Missing'));st.stop()
     result,target=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,quote,capital_hurdle,financing_days)
 except ValueError as e: st.error(str(e));st.stop()
 summary=deal_summary(result,discount,investment,recovery)
 with summary_panel:
     pdf_panel=st.container()
-with summary_panel:
+with summary_panel.container(border=True):
     st.subheader('Deal summary')
     st.caption(f'Broker: {broker_name or "Not specified"} • Offer due: {offer_due or "Not specified"}')
     st.caption(f'{customer} • Start {start_entered:%b %d, %Y} • {term} month term • Settlements {pd.Timestamp(asof):%b %d, %Y}')
@@ -306,8 +362,9 @@ with summary_panel:
     top[1].metric('Volume sold (contract MMBtu)',f"{summary['volume']:,.0f}")
     top[2].metric('Contract price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
     top[3].metric(f'NPV @ {discount:.2%} annual',f"${summary['npv']:,.0f}")
-    top[3].metric('Break-even price ($/MMBtu)',f'${target-margin:,.4f}')
-    bottom=st.columns(3)
+    bottom_break_even=target-margin
+    bottom=st.columns(4)
+    bottom[3].metric('Break-even ($/MMBtu)',f'${bottom_break_even:,.4f}')
     bottom[0].metric('IRR (annualized)',f"{summary['irr']:.2%}" if summary['irr'] is not None else 'N/A')
     bottom[1].metric('MMBtu spread ($/MMBtu)',f"${summary['spread']:,.4f}")
     bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
@@ -340,20 +397,21 @@ with pdf_panel:
     except ImportError:
         st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
 
-st.dataframe(scenario_table,hide_index=True,use_container_width=True)
+st.dataframe(format_table(scenario_table),hide_index=True,use_container_width=True)
 st.caption('Monthly and annualized averages use the selected contract term. The schedule below shows actual monthly profits. NPV includes initial investment and recovery; break-even price is the volume-weighted cost including the capital charge.')
 with st.expander('Monthly offer economics',expanded=True):
     st.line_chart(scenario_monthly)
-    st.dataframe(scenario_monthly.reset_index(),hide_index=True,use_container_width=True)
+    st.dataframe(format_table(scenario_monthly.reset_index().rename(columns={c:c+" profit ($)" for c in scenario_monthly.columns})), hide_index=True,use_container_width=True)
 st.download_button('Download offer comparison CSV',scenario_table.to_csv(index=False).encode(),'offer_comparison.csv','text/csv')
 st.download_button('Download monthly offer economics CSV',scenario_monthly.reset_index().to_csv(index=False).encode(),'monthly_offer_economics.csv','text/csv')
 t1,t2,t3=st.tabs(['Monthly economics','Term comparisons','Method & source'])
 with t1:
     st.line_chart(result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']])
     st.bar_chart(result[['gross_profit']])
-    st.dataframe(result.reset_index(),hide_index=True,use_container_width=True)
+    st.dataframe(format_table(result.reset_index()),hide_index=True,use_container_width=True)
     totals=result[['usage_mmbtu','revenue','supply_cost','transport_cost','broker_cost','capital_cost','gross_profit']].sum()
-    st.write('Contract totals',totals.to_frame('Total').T)
+    st.write('Contract totals')
+    st.dataframe(format_table(totals.to_frame('Total').T),hide_index=True,use_container_width=True)
     st.write('Selected-strip averages',pd.DataFrame({'Simple average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mean(),'Volume-weighted average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mul(result.usage_mmbtu,axis=0).sum()/vol}))
 with t2:
     st.caption('Compares standard terms and your selected term within the entered usage schedule. Longer terms require extending the schedule above. Each term is priced separately to the same target margin.')
@@ -362,7 +420,7 @@ with t2:
         if n>term or usage.usage_mmbtu.iloc[:n].sum()<=0: continue
         r,q=calculate(p.iloc[:n],usage.usage_mmbtu.iloc[:n],transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days)
         rows.append({'Months':n,'Volume MMBtu':r.usage_mmbtu.sum(),'Target fixed price':q,'Gross profit':r.gross_profit.sum(),'Annualized GP':r.gross_profit.sum()*12/n})
-    st.dataframe(pd.DataFrame(rows),hide_index=True)
+    st.dataframe(format_table(pd.DataFrame(rows)),hide_index=True)
 with t3:
     st.write('Supply = sum of selected components ÷ (1 − fuel retention). Landed cost = supply + upstream transport + brokerage. Target fixed price = volume-weighted landed cost + target margin. Capital charge = max(landed cost, 0) × annual hurdle × financing days / 365. Target fixed price = weighted landed cost + weighted capital charge + target margin. Monthly modeled profit = (customer fixed price − landed cost − capital charge) × usage.')
     st.write('Uses actual entered monthly volumes, calendar delivery months and a single settlement snapshot. No interpolation, silent zero filling or fallback to older settlements. Daily swing observations are not converted to forward prices.')

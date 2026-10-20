@@ -98,6 +98,53 @@ def deal_summary(result, annual_discount=0.10, initial_investment=0., terminal_r
                 contract_price=float(result.customer_rate.iloc[0]),npv=float(npv),irr=irr,irr_status=status,
                 spread=gp/volume,gross_margin=gp/revenue if revenue>0 else None)
 
+def build_summary_pdf(meta, summary, result, scenarios):
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.enums import TA_LEFT
+    buffer=BytesIO()
+    navy=colors.HexColor('#153449');teal=colors.HexColor('#197D87');pale=colors.HexColor('#EDF4F6')
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='Brand',fontName='Helvetica-Bold',fontSize=17,leading=21,textColor=navy))
+    styles.add(ParagraphStyle(name='SmallREM',fontName='Helvetica',fontSize=8,leading=11,textColor=navy))
+    styles.add(ParagraphStyle(name='SectionREM',fontName='Helvetica-Bold',fontSize=10,leading=14,textColor=teal,spaceBefore=12,spaceAfter=7))
+    def para(text):return Paragraph(escape(str(text)),styles['SmallREM'])
+    def usd(v):return f'${v:,.0f}'
+    def pct(v):return f'{v:.2%}' if v is not None else 'N/A'
+    story=[Paragraph('RIVERBEND ENERGY MANAGEMENT',styles['Brand']),Paragraph('DEAL ECONOMICS | INTERNAL REVIEW',styles['SectionREM']),para(meta['customer']),para(f"Broker: {meta.get('broker_name','Not specified')}   |   Offer due: {meta.get('due_date','Not specified')}"),para(f"Delivery start: {meta['start']}   |   Term: {meta['term']} months   |   Settlements: {meta['asof']}"),Spacer(1,14)]
+    metrics=[('Annualized revenue',usd(summary['annual_revenue'])),('Contract volume',f"{summary['volume']:,.0f} MMBtu"),('Contract price',f"${summary['contract_price']:.4f}/MMBtu"),(f"NPV @ {meta['discount']:.2%}",usd(summary['npv'])),('Break-even price',f"${meta['break_even']:.4f}/MMBtu"),('Annualized IRR',pct(summary['irr'])),('Spread after capital',f"${summary['spread']:.4f}/MMBtu"),('Margin after capital',pct(summary['gross_margin']))]
+    cards=[]
+    for i in [0,4]:
+        cards.append([Paragraph(f'<font size="8">{escape(label)}</font><br/><br/><b>{escape(value)}</b>',styles['SmallREM']) for label,value in metrics[i:i+4]])
+    table=Table(cards,colWidths=[132]*4,rowHeights=[58,58])
+    table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),pale),('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),.4,colors.white),('INNERGRID',(0,0),(-1,-1),4,colors.white),('LEFTPADDING',(0,0),(-1,-1),10),('TOPPADDING',(0,0),(-1,-1),10)]));story.append(table)
+    story.append(Paragraph('Offer comparison',styles['SectionREM']))
+    rows=[['Scenario','Price\n$/MMBtu','Spread\n$/MMBtu','Annualized\nprofit','Contract\nprofit','NPV']]
+    for row in scenarios:
+        npv=next(v for k,v in row.items() if k.startswith('NPV @'))
+        rows.append([row['Scenario'],f"${row['Offer $/MMBtu']:.4f}",f"${row['Spread $/MMBtu']:.4f}",usd(row['Annualized GP $']),usd(row['Contract GP $']),usd(npv)])
+    def styled_table(rows,widths):
+        t=Table([[para(v) for v in row] for row in rows],colWidths=widths,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,teal),('LINEBELOW',(0,1),(-1,-1),.3,colors.HexColor('#DBE5E9')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8)]));return t
+    story.append(styled_table(rows,[116,78,78,88,88,80]))
+    story.append(Paragraph('Pricing and credit assumptions',styles['SectionREM']))
+    assumptions=[['Upstream transport',f"${meta['transport']:.4f}/MMBtu",'Brokerage',f"${meta['broker']:.4f}/MMBtu"],['Target spread',f"${meta['margin']:.4f}/MMBtu",'Supply fuel',pct(meta['fuel'])],['Capital hurdle',pct(meta['capital_hurdle']),'Financing period',f"{meta['days']:g} days"],['Capital charge',f"${result.capital_cost.sum()/summary['volume']:.4f}/MMBtu",'Discount rate',pct(meta['discount'])],['Upfront credit cash',usd(meta['investment']),'Terminal credit recovery',usd(meta['recovery'])]]
+    story.append(styled_table(assumptions,[132,132,132,132]))
+    story.append(Paragraph('Source and valuation basis',styles['SectionREM']))
+    story.append(para('Source: '+meta['source']))
+    story.append(para('Market components: '+meta['components']))
+    story.append(Spacer(1,6))
+    story.append(para('NPV is measured at contract start using the stated effective annual rate and month-end profit after the modeled capital charge. IRR is annualized on upfront credit cash and includes terminal credit recovery. These are cash-flow estimates, not a full working-capital forecast.'))
+    story.append(Spacer(1,5))
+    story.append(para('Annualized revenue and profit equal contract totals multiplied by 12 / term months. Break-even includes supply, transport, brokerage and capital charge; overhead and taxes are excluded. The offer reductions hold volumes and costs constant.'))
+    def footer(c,doc):
+        c.setStrokeColor(teal);c.line(42,39,570,39);c.setFont('Helvetica',7);c.setFillColor(navy);c.drawString(42,27,'CONFIDENTIAL | Riverbend Energy Management');c.drawRightString(570,27,f'Page {doc.page}')
+    SimpleDocTemplate(buffer,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=36,bottomMargin=50,title='Riverbend Deal Economics',author='Riverbend Energy Management').build(story,onFirstPage=footer,onLaterPages=footer)
+    return buffer.getvalue()
+
 
 ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
@@ -148,6 +195,8 @@ with st.expander('1. Select ICE pricing file and contract dates', expanded=True)
     asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'))
     st.caption('All components use this exact trade date. Missing months block a quote.')
     customer=st.text_input('Customer',value=defaults['customer'])
+    broker_name=st.text_input('Broker name / firm',value='')
+    offer_due=st.date_input('Offer due date',value=None)
     start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date())
     start=start_entered.replace(day=1)
     if start_entered.day!=1: st.caption('Monthly pricing uses the start month. Enter first-month usage for the remaining delivery days; usage is not automatically prorated.')
@@ -209,7 +258,10 @@ try:
 except ValueError as e: st.error(str(e));st.stop()
 summary=deal_summary(result,discount,investment,recovery)
 with summary_panel:
+    pdf_panel=st.container()
+with summary_panel:
     st.subheader('Deal summary')
+    st.caption(f'Broker: {broker_name or "Not specified"} • Offer due: {offer_due or "Not specified"}')
     st.caption(f'{customer} • Start {start_entered:%b %d, %Y} • {term} month term • Settlements {pd.Timestamp(asof):%b %d, %Y}')
     top=st.columns(4)
     top[0].metric('Annual revenue (annualized)',f"${summary['annual_revenue']:,.0f}")
@@ -224,7 +276,7 @@ with summary_panel:
     st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
     st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
     st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
-    st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
+    st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
 vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
 a,b,c,d=st.columns(4)
 a.metric('Target customer fixed price',f'${target:,.4f}/MMBtu')
@@ -243,6 +295,13 @@ for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20
     scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
     scenario_monthly[label]=sr.gross_profit
 scenario_table=pd.DataFrame(scenario_rows)
+with pdf_panel:
+    try:
+        pdf_bytes=build_summary_pdf(dict(customer=customer,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
+        st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
+    except ImportError:
+        st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
+
 st.dataframe(scenario_table,hide_index=True,use_container_width=True)
 st.caption('Monthly and annualized averages use the selected contract term. The schedule below shows actual monthly profits. NPV includes initial investment and recovery; break-even price is the volume-weighted cost including the capital charge.')
 with st.expander('Monthly offer economics',expanded=True):

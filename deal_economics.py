@@ -98,6 +98,30 @@ def deal_summary(result, annual_discount=0.10, initial_investment=0., terminal_r
                 contract_price=float(result.customer_rate.iloc[0]),npv=float(npv),irr=irr,irr_status=status,
                 spread=gp/volume,gross_margin=gp/revenue if revenue>0 else None)
 
+def standard_offers(prices, asof, selections, start, usage, fallback_profile, transport, broker, margin, fuel, capital_hurdle, financing_days):
+    """Exact entered months first, then repeat first-year calendar-month estimates."""
+    schedule=usage.copy()
+    schedule['month']=pd.to_datetime(schedule['month'])
+    exact=dict(zip(schedule['month'],schedule['usage_mmbtu']))
+    profile=dict(fallback_profile)
+    for row in schedule.iloc[:12].itertuples(index=False): profile[row.month.month]=row.usage_mmbtu
+    rows=[]
+    for n in [12,18,24,36,48]:
+        months=pd.date_range(start,periods=n,freq='MS')
+        volumes=[exact[m] if m in exact else profile[m.month] for m in months]
+        projected=sum(m not in exact for m in months)
+        pricing=curve(prices,asof,selections,months)
+        missing=int(pricing.isna().any(axis=1).sum())
+        if missing:
+            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,projected_usage_months=projected,status=f'Unavailable: {missing} months missing settlements'))
+            continue
+        try:
+            result,offer=calculate(pricing,volumes,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days)
+            rows.append(dict(term_months=n,offer_price=offer,break_even=offer-margin,contract_volume=result.usage_mmbtu.sum(),contract_profit=result.gross_profit.sum(),projected_usage_months=projected,status='Available'))
+        except ValueError as e:
+            rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,projected_usage_months=projected,status=str(e)))
+    return pd.DataFrame(rows)
+
 def build_summary_pdf(meta, summary, result, scenarios):
     from io import BytesIO
     from xml.sax.saxutils import escape
@@ -249,6 +273,20 @@ if usage_file is not None:
 usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True)},key=f'usage_{start}_{term}',use_container_width=True)
 manual=st.checkbox('Evaluate a proposed customer fixed price')
 quote=st.number_input('Proposed customer price ($/MMBtu)',value=4.,step=.01) if manual else None
+offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days)
+with summary_panel:
+    with st.container(border=True):
+        st.subheader('Projected offers | standard contract terms')
+        st.caption(f'Start: {start_entered:%b %d, %Y} • Target margin after capital: ${margin:.4f}/MMBtu • Settlements: {pd.Timestamp(asof):%Y-%m-%d}')
+        st.caption(f'Shared assumptions: transport ${transport:.4f}/MMBtu | brokerage ${broker:.4f}/MMBtu | capital hurdle {capital_hurdle:.2%} | financing {financing_days:g} days | target margin ${margin:.4f}/MMBtu')
+        offer_cols=st.columns(5)
+        for col,row in zip(offer_cols,offers.itertuples(index=False)):
+            col.metric(f'{row.term_months} months',f'${row.offer_price:.4f}' if pd.notna(row.offer_price) else 'Unavailable')
+            col.caption('$/MMBtu' if row.status=='Available' else row.status)
+        st.caption('Each offer is a separately calculated fixed price including supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; any calendar months not entered use the displayed 1,700 MMBtu/month default. These are projected offers, independent of a manually entered customer price.')
+        with st.expander('Standard offer detail and volume assumptions'):
+            st.dataframe(offers,hide_index=True,use_container_width=True)
+        st.download_button('Download standard offers CSV',offers.to_csv(index=False).encode(),'standard_contract_offers.csv','text/csv')
 try:
     p=curve(prices,asof,selections,months)
     if p.isna().any().any():

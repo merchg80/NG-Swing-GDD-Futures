@@ -176,12 +176,14 @@ cap1,cap2=st.columns(2)
 capital_hurdle=cap1.number_input('Annual capital hurdle (%)',min_value=0.,value=8.,step=.5)/100
 financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.,step=1.)
 st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
-with st.expander('NPV and IRR assumptions'):
+with st.expander('Upfront credit and investment returns',expanded=True):
     a,b,c=st.columns(3)
     discount=a.number_input('Annual discount rate (%)',min_value=0.,value=10.,step=.5)/100
-    investment=b.number_input('Initial cash investment ($)',min_value=0.,value=0.,step=1000.)
-    recovery=c.number_input('Cash recovered at contract end ($)',min_value=0.,value=0.,step=1000.)
-    st.caption('NPV is measured at contract start. Cash flows use month-end profit after the modeled capital charge, before overhead and taxes, less initial investment, plus terminal recovery. Enter posted collateral as initial cash and its expected return as terminal recovery. IRR is annualized and requires an initial cash outflow.')
+    investment=b.number_input('Upfront cash posted for credit ($)',min_value=0.,value=0.,step=1000.,help='Cash collateral posted at contract start. Do not enter the face amount of an unfunded letter of credit.')
+    full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True)
+    recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',min_value=0.,value=0.,step=1000.)
+    c.caption(f'Credit cash recovered: ${recovery:,.0f}')
+    st.caption('NPV is measured at contract start. Cash flows use month-end profit after the modeled capital charge, before overhead and taxes, less initial investment, plus terminal recovery. The upfront credit amount is a cash outflow at contract start. Credit cash is returned in the final month under the selected recovery assumption. Monthly profit is received at month-end. The posted credit cash is separate from the financing-days capital charge; no additional interest charge on collateral is added. IRR is annualized and requires an initial cash outflow.')
 months=pd.date_range(start,periods=term,freq='MS')
 base=pd.DataFrame({'month':months,'usage_mmbtu':[defaults['usage'].get(m.month,0.) for m in months]})
 st.subheader('Customer monthly usage')
@@ -221,7 +223,7 @@ with summary_panel:
     bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
     st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
     st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
-    st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,initial_investment=investment,terminal_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
+    st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
 vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
 a,b,c,d=st.columns(4)
 a.metric('Target customer fixed price',f'${target:,.4f}/MMBtu')

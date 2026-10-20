@@ -279,7 +279,7 @@ h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
 logo_left,logo_center,logo_right=st.columns([1,3,1])
 with logo_center:st.image(get_logo_bytes(),use_container_width=True)
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build RGM-AUTO-CREDIT-1020')
+st.caption('Pricing: GitHub input folder | Build RGM-FILE-SELECTION-FIX')
 def workstream_config():
     def setting(name,default=''):
         try:return str(st.secrets.get(name,os.getenv(name,default)))
@@ -308,6 +308,7 @@ if '_pending_workstream' in st.session_state:
             st.session_state[k]=v
     st.session_state['_restored_usage']=pending.get('usage',[])
     st.session_state['_saved_pricing_file']=pending.get('pricing_file')
+    st.session_state['_restore_saved_file_once']=True
     st.session_state['_saved_trade_date']=pending.get('trade_date')
     st.session_state['_restore_pricing']=True
     if 'wk_credit_mode' not in pending.get('widgets',{}):st.session_state['wk_credit_mode']='Manual'
@@ -402,10 +403,16 @@ with st.expander('1. Select ICE pricing file and contract dates', expanded=True)
         st.stop()
     names=[str(p.relative_to(INPUT_DIR)) for p in available]
     desired=st.session_state.get('_saved_pricing_file')
-    if desired and desired in names and st.session_state.get('_restore_pricing'):
-        st.session_state['wk_pricing_file']=desired
+    if st.session_state.pop('_restore_saved_file_once',False):
+        if desired in names:
+            st.session_state['wk_pricing_file']=desired
+        else:
+            st.warning('The saved pricing file is no longer available. Choose another file below.')
     if st.session_state.get('wk_pricing_file') not in names:st.session_state.pop('wk_pricing_file',None)
     def change_pricing_file():
+        # A user selection supersedes the old saved-workstream file reference.
+        st.session_state['_saved_pricing_file']=st.session_state.get('wk_pricing_file')
+        st.session_state.pop('_restore_saved_file_once',None)
         if '_current_snapshot' in st.session_state:st.session_state['_pricing_carry']=st.session_state['_current_snapshot']
         st.session_state['_restore_pricing']=True
         st.session_state['_saved_trade_date']=None

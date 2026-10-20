@@ -178,7 +178,7 @@ financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.
 st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
 with st.expander('Upfront credit and investment returns',expanded=True):
     a,b,c=st.columns(3)
-    discount=a.number_input('Annual discount rate (%)',min_value=0.,value=10.,step=.5)/100
+    discount=a.number_input('Required annual discount rate (%)',min_value=0.,value=10.,step=.5,format='%.2f',help='Effective annual rate used for NPV. This is separate from the offer-price capital hurdle and does not change IRR.')/100
     investment=b.number_input('Upfront cash posted for credit ($)',min_value=0.,value=0.,step=1000.,help='Cash collateral posted at contract start. Do not enter the face amount of an unfunded letter of credit.')
     full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True)
     recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',min_value=0.,value=0.,step=1000.)
@@ -215,12 +215,13 @@ with summary_panel:
     top[0].metric('Annual revenue (annualized)',f"${summary['annual_revenue']:,.0f}")
     top[1].metric('Volume sold (contract MMBtu)',f"{summary['volume']:,.0f}")
     top[2].metric('Contract price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
-    top[3].metric('NPV at contract start',f"${summary['npv']:,.0f}")
+    top[3].metric(f'NPV @ {discount:.2%} annual',f"${summary['npv']:,.0f}")
     top[3].metric('Break-even price ($/MMBtu)',f'${target-margin:,.4f}')
     bottom=st.columns(3)
     bottom[0].metric('IRR (annualized)',f"{summary['irr']:.2%}" if summary['irr'] is not None else 'N/A')
     bottom[1].metric('MMBtu spread ($/MMBtu)',f"${summary['spread']:,.4f}")
     bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
+    st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
     st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
     st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
     st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
@@ -239,7 +240,7 @@ for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20
     offer_price=float(result.customer_rate.iloc[0])-reduction
     sr,_=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,offer_price,capital_hurdle,financing_days)
     ss=deal_summary(sr,discount,investment,recovery)
-    scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),'NPV $':ss['npv'],'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
+    scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
     scenario_monthly[label]=sr.gross_profit
 scenario_table=pd.DataFrame(scenario_rows)
 st.dataframe(scenario_table,hide_index=True,use_container_width=True)

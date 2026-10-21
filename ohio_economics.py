@@ -307,6 +307,7 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
         return [p('Ohio acquisition economics','TitleOH'),p(utility,'HeadingOH'),p(subtitle)]
     name=report.get('name') or 'Ohio acquisition campaign'
     story=header(name)
+    if q.get('customer_count') is not None:story.append(p(f"Target campaign customers: {q['customer_count']:,.0f}",'HeadingOH'))
     story.extend([p(f"Delivery start: {start} | Selected term: {q['term']} months | Settlements: {asof}"),p(f"Broker: {report.get('broker') or 'Not specified'} | Offer due: {report.get('due') or 'Not specified'}"),p('Prepared '+datetime.now(ZoneInfo('America/Chicago')).strftime('%b %d, %Y %I:%M %p CT')),Spacer(1,10)])
     model=report.get('model_results') or results
     actual=report.get('actual_results',{})
@@ -319,7 +320,7 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
         x=model[n][0];y=actual[n][0] if n in actual else None
         rows.append([f'{n} mo.',money(x['target_price'],4),money(y['offer_price'],4) if y else 'Not entered',money(x['annual_profit']),money(y['annual_profit']) if y else '-',money(x.get('annual_profit_per_customer'),2),money(y.get('annual_profit_per_customer'),2) if y else '-'])
         returns.append([f'{n} mo.',money(x['npv']),money(y['npv']) if y else '-',percent(x['term_irr']),percent(y['term_irr']) if y else '-'])
-    story.append(table(rows,[36,72,72,84,84,90,90],highlights=(4,6)))
+    story.append(table(rows,[36,72,72,84,84,90,90],highlights=(2,4,6)))
     story.extend(heading('Investment return comparison'))
     story.append(table(returns,[56,118,118,118,118]))
     story.extend([Spacer(1,7),p('Model offers achieve the selected target spread. Actual-offer economics use the entered customer prices with identical cost and load assumptions. Blank actual offers remain unquoted. Annual profit/customer uses the total utility campaign count once.')])
@@ -397,7 +398,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-13 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-15 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):

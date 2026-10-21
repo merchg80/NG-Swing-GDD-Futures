@@ -44,6 +44,11 @@ import pandas as pd
 TERMS=[6,12,18,24,36,48]
 ROUTES={'Columbia Gas of Ohio':['TCO'],'Enbridge Gas Ohio (formerly Dominion Energy Ohio)':['East - Eastern Gas','West - TCO']}
 
+def component_weights(utility,route):
+    if utility.startswith('Columbia'):return {'H':1.,'TCO':.9,'TIS':.9,'REX':.1,'REI':.1}
+    if 'East' in route:return {'H':1.,'DOM':1.,'DIS':1.}
+    return {'H':1.,'TCO':1.,'TIS':1.}
+
 def monthly_returns(cash, discount):
     cash=np.asarray(cash,dtype=float)
     if not np.isfinite(cash).all():raise ValueError('Non-finite investment cash flows.')
@@ -239,43 +244,72 @@ def save_workstream(repo,token,name,snapshot,branch='main',path=None,sha=None):
     response=github_request(repo,token,'/contents/'+path,'PUT',body)
     return path,response['content']['sha'],payload
 
-def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta):
+def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None):
     from io import BytesIO
     from xml.sax.saxutils import escape
-    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,PageBreak
     from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
     from reportlab.lib import colors
-    output=BytesIO();styles=getSampleStyleSheet();styles.add(ParagraphStyle(name='OH',fontName='Helvetica',fontSize=8,leading=11,textColor=colors.HexColor('#074f42')))
-    def p(v):return Paragraph(escape(str(v)),styles['OH'])
-    def money(v):return f'${v:,.0f}'
-    def table(rows,widths):
-        t=Table([[p(v) for v in r] for r in rows],colWidths=widths,repeatRows=1)
-        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#edf4f1')),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#bdcec8')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));return t
-    story=[Image(BytesIO(get_logo_bytes()),width=280,height=280*402/2096),Spacer(1,10),Paragraph('OHIO UTILITY ECONOMICS',styles['Heading2']),p(utility),p(f'Start {start} | Detailed term {q["term"]} months | Settlements {asof}'),Spacer(1,12)]
-    rows=[['Selected-term metric','Value','Selected-term metric','Value'],['All-in price',f'${q["offer_price"]:.4f}/MMBtu','Annualized revenue',money(q['annual_revenue'])],['Operating break-even',f'${q["operating_break_even"]:.4f}/MMBtu','NPV-zero price',f'${q["npv_zero_price"]:.4f}/MMBtu'],['Contract volume',f'{q["contract_volume"]:,.0f} MMBtu','Contract overhead',money(q['overhead'])],['Profit after overhead',money(q['contract_profit']),'Annualized profit',money(q['annual_profit'])],[f'NPV @ {q["discount"]:.2%}',money(q['npv']),'Term IRR',f'{q["term_irr"]:.2%}' if q['term_irr'] is not None else 'N/A'],['Upfront credit',money(q['credit']),'Opening storage cash',money(q['opening_inventory_cash'])],['Terminal credit recovery',money(q['credit_recovery']),'Terminal storage sale',money(q['terminal_storage_proceeds'])]]
-    if q.get('customer_count'):
-        rows.append(['Contract profit / customer',f"${q['contract_profit_per_customer']:,.2f}",'Annualized profit / customer',f"${q['annual_profit_per_customer']:,.2f}"])
-        rows.append(['Campaign customers',f"{q['customer_count']:,.0f}",'Per-customer basis','Total utility campaign'])
-    for route,config in configs.items():
-        story.append(p(route+' storage at term end: '+config.get('terminal_mode','Sell at final forward price')))
-    if q.get('storage_transferred_volume',0)>0:story.append(p(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu; book cost {money(q['storage_transferred_book'])}. No terminal transfer proceeds or inventory credit; funded gas remains a contract cost."))
+    report=report or {};out=BytesIO()
+    green=colors.HexColor('#074F42');wine=colors.HexColor('#862131');pale=colors.HexColor('#F1F5F3');line=colors.HexColor('#CAD8D2')
+    styles=getSampleStyleSheet()
+    for name,size,leading,font in [('BodyOH',8,11,'Helvetica'),('HeadingOH',11,15,'Helvetica-Bold'),('TitleOH',20,24,'Helvetica-Bold'),('ValueOH',14,19,'Helvetica-Bold')]:
+        styles.add(ParagraphStyle(name=name,fontName=font,fontSize=size,leading=leading,textColor=green,spaceAfter=4))
+    def p(v,style='BodyOH'):return Paragraph(escape(str(v)),styles[style])
+    def money(v,d=0):return f'${v:,.{d}f}' if v is not None else 'N/A'
+    def percent(v):return f'{v:.2%}' if v is not None else 'N/A'
+    def heading(v):return [Spacer(1,10),p(v,'HeadingOH')]
+    def table(rows,widths,highlights=()):
+        t=Table([[p(v) for v in row] for row in rows],colWidths=widths,repeatRows=1,hAlign='LEFT')
+        commands=[('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,wine),('LINEBELOW',(0,1),(-1,-1),.3,line),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]
+        for col in highlights:commands.extend([('BACKGROUND',(col,1),(col,-1),pale),('BOX',(col,0),(col,-1),.8,wine)])
+        t.setStyle(TableStyle(commands));return t
+    def header(subtitle):
+        return [p('Ohio acquisition economics','TitleOH'),p(utility,'HeadingOH'),p(subtitle)]
+    name=report.get('name') or 'Ohio acquisition campaign'
+    story=header(name)
+    story.extend([p(f"Delivery start: {start} | Selected term: {q['term']} months | Settlements: {asof}"),p(f"Broker: {report.get('broker') or 'Not specified'} | Offer due: {report.get('due') or 'Not specified'}"),p('Prepared '+datetime.now(ZoneInfo('America/Chicago')).strftime('%b %d, %Y %I:%M %p CT')),Spacer(1,10)])
+    story.extend(heading('Campaign term offers'))
+    rows=[['Term','Margin target $/MMBtu','Tested offer $/MMBtu','Annual profit','Contract profit','Annual profit / cust.','NPV','Term IRR']]
+    for n in [6,12,18,24,36,48]:
+        if n not in results:rows.append([f'{n} mo.','Unavailable','Missing inputs','','','','','']);continue
+        x=results[n][0]
+        rows.append([f'{n} mo.',money(x['target_price'],4),money(x['offer_price'],4),money(x['annual_profit']),money(x['contract_profit']),money(x.get('annual_profit_per_customer'),2),money(x['npv']),percent(x['term_irr'])])
+    story.append(table(rows,[36,66,66,64,72,74,76,74],highlights=(3,4)))
+    story.extend([Spacer(1,8),p('Target prices use the selected margin. Tested offers and their economics follow each term card. The selected detailed offer above may have its own manual price. Annualized profit is contract profit x 12 / term months; per-customer figures use the total utility campaign count once.')])
+    story.extend(heading('Selected campaign offer'))
+    metrics=[('Selected all-in offer',money(q['offer_price'],4)+'/MMBtu'),('Contract profit',money(q['contract_profit'])),('Annualized profit',money(q['annual_profit'])),('Campaign customers',f"{q.get('customer_count',0) or 0:,.0f}"),('Contract profit / customer',money(q.get('contract_profit_per_customer'),2)),('Annual profit / customer',money(q.get('annual_profit_per_customer'),2))]
+    cards=[]
+    for offset in [0,3]:
+        cards.append([Paragraph(escape(label)+'<br/><b>'+escape(value)+'</b>',styles['ValueOH']) for label,value in metrics[offset:offset+3]])
+    card=Table(cards,colWidths=[176]*3)
+    card.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),pale),('BOX',(0,0),(-1,-1),1,wine),('INNERGRID',(0,0),(-1,-1),1,colors.white),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),10)]));story.append(card)
+    story.extend(heading('Selected-offer investment and margin'))
+    story.append(table([['Contract volume','NPV @ '+percent(q['discount']),'Term IRR','Net spread','Gross margin'],[f"{q['contract_volume']:,.0f} MMBtu",money(q['npv']),percent(q['term_irr']),money(q['spread'],4)+'/MMBtu',percent(q['gross_margin'])]],[116,116,90,112,94]))
+    story.append(PageBreak());story.extend([p('Price construction and assumptions','TitleOH'),p(name+' | '+utility)])
+    bridge=report.get('bridge') or []
+    if bridge:
+        story.extend(heading('Selected offer price construction'))
+        story.append(table([['Component','Contract dollars','$/sold MMBtu']]+[[r['Price component'],money(r['Contract dollars'],2),money(r['$/sold MMBtu'],4)] for r in bridge],[300,114,114]))
+    story.extend(heading('Customer mix, funding and storage'))
     campaign=next((c.get('campaign') for c in configs.values() if c.get('campaign')),None)
-    if campaign:story.extend([p(f"Campaign: {campaign['customers']:,.0f} customers | Residential {campaign['residential_share']:.0%} | DEO East share {campaign['east_share']:.0%} | OPEX ${campaign['opex_hurdle']:.4f}/sold MMBtu"),p('Weather: '+campaign['normal_baseline']+'; daily profiles, no weekday multipliers. Columbia storage uses the East design-day proxy.')])
-    story.extend([table(rows,[140,124,140,124]),Spacer(1,10),Paragraph('Standard contract terms',styles['Heading3'])])
-    rows=[['Term','All-in price','Annual profit','NPV','Term IRR']]
-    for n in [12,18,24,36,48]:
-        if n not in results:
-            rows.append([f'{n} months','Unavailable','Review curve / inputs','','']);continue
-        x=results[n][0];rows.append([f'{n} months',f'${x["offer_price"]:.4f}',money(x['annual_profit']),money(x['npv']),f'{x["irr"]:.2%}' if x['term_irr'] is not None else 'N/A'])
-    story.append(table(rows,[85,110,110,110,113]));story.extend([Spacer(1,10),Paragraph('Supply paths and storage close-out',styles['Heading3'])])
+    if campaign:
+        count=campaign['customers'];res=campaign['residential_share'];east=campaign['east_share']
+        shares=[('Columbia',1.)] if utility.startswith('Columbia') else [('DEO East',east),('DEO West',1-east)]
+        story.append(table([['Territory','Residential','Commercial','Total']]+[[territory,f'{count*share*res:,.1f}',f'{count*share*(1-res):,.1f}',f'{count*share:,.1f}'] for territory,share in shares],[180,116,116,116]))
+    story.append(p(f"Upfront credit: {money(q['credit'])} | Opening storage funding: {money(q['opening_inventory_cash'])} | Credit returned at term end: {money(q['credit_recovery'])}"))
     for route,config in configs.items():
-        m=route_meta[route];components=' + '.join(x[2] for x in config['components'])
-        story.append(p(f'{route}: {components}; {config["ft_basis"].lower()} FT-rate basis; {config["terminal_mode"]}; index treatment {config.get("index_treatment","Use file settlements")}, manual value {config.get("index_override")}. Ending inventory {m["ending_inventory"]:,.0f} MMBtu; terminal proceeds {money(m["terminal_storage_proceeds"])}.'))
-    story.extend([Spacer(1,8),p('FT obligations use each entered month, not customer usage. Overhead is allocated once to the utility. Storage uses weighted-average book cost and explicit purchase/withdrawal cash flows. Annualized values are contract averages. Terminal storage proceeds assume liquidation at the last forward supply price if selected. NPV and IRR include opening inventory funding and term-end collateral recovery.'),Spacer(1,6),p('Source: input/'+source),p(f'Capacity review: {q["shortfall_volume"]:,.0f} MMBtu of upstream purchases above the entered monthly FT envelope. No alternate capacity price or daily pipeline capability is assumed.')])
+        meta=route_meta[route];weights=config.get('price_weights',{})
+        pricing=' + '.join(f'{weight:.0%} {code}' for code,weight in weights.items())
+        story.append(p(f"{route}: {pricing}. Storage close-out: {config['terminal_mode']}. Ending gas: {meta['ending_inventory']:,.1f} MMBtu; terminal proceeds: {money(meta['terminal_storage_proceeds'])}."))
+    if report.get('assumptions'):story.append(p(report['assumptions']))
+    story.extend([Spacer(1,7),p('Source: input/'+source),p('Weather: 2016-2025 weighted ERA5 coordinate-based daily normals; no weekday multipliers. Columbia storage uses the East design-day proxy. Opening storage is an upfront purchase, allocated over contract sales in the price table. Storage transfer retains funded gas cost without terminal proceeds or a residual credit.'),p('NPV uses the displayed effective annual discount rate converted to monthly. Term IRR compounds the monthly investment IRR over the selected term. Credit recovery and storage proceeds occur only at the actual term end. Capacity inputs require review; this is an indicative internal underwrite.')])
     def footer(c,doc):
-        c.setFont('Helvetica',7);c.setFillColor(colors.HexColor('#074f42'));c.drawString(42,27,'CONFIDENTIAL | Ohio supply economics | Indicative model');c.drawRightString(570,27,f'Page {doc.page}')
-    SimpleDocTemplate(output,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=30,bottomMargin=48).build(story,onFirstPage=footer,onLaterPages=footer)
-    return output.getvalue()
+        c.setStrokeColor(wine);c.line(42,39,570,39);c.setFont('Helvetica',7);c.setFillColor(green);c.drawString(42,27,'CONFIDENTIAL | Ohio acquisition campaign');c.drawRightString(570,27,f'Page {doc.page}')
+    SimpleDocTemplate(out,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=30,bottomMargin=50,title=name+' - Campaign Economics',author='Ohio acquisition economics').build(story,onFirstPage=footer,onLaterPages=footer)
+    return out.getvalue()
 
 """Acquisition load using supplied workbook factors and weighted 2016–2025 ERA5 normals."""
 import json, calendar
@@ -321,10 +355,8 @@ def acquisition_campaign(months,utility,customers=500,east_share=.9,residential_
 ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
-a,b,c=st.columns([1,3,1])
-with b:st.image(get_logo_bytes(),width=520)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-08 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-10 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -344,7 +376,7 @@ if '_oh_pending' in st.session_state:
     if snap.get('trade_date'):st.session_state['oh_asof']=pd.Timestamp(snap['trade_date'])
     for k,v in snap.get('widgets',{}).items():
         if not persistent_ohio_widget(k):continue
-        if k=='oh_start':v=pd.Timestamp(v).date()
+        if k=='oh_start' or (k.endswith('_report_due') and v):v=pd.Timestamp(v).date()
         if '_component_' in k:v=tuple(v)
         st.session_state[k]=v
 
@@ -464,19 +496,19 @@ route_prices={};schedules={};configs={};profile_records={};seed_version=st.sessi
 for r_index,route in enumerate(routes):
     key=f'oh_{uid}_r{r_index}'
     with st.expander(route+' | forward curve, capacity and storage',expanded=True):
-        weights={'TCF':.9,'REH':.1} if utility=='Columbia Gas of Ohio' else ({'DSF':1.} if 'East' in route else {'TCF':1.})
+        weights=component_weights(utility,route)
         choices=[]
         route_prices[route]=pd.Series(0.,index=months)
-        index_mode='ICE outright settlements';index_override=None
+        index_mode='Henry Hub + basis + financial index';index_override=None
         for j,(code,weight) in enumerate(weights.items()):
             matches=[x for x in options if x[2]==code]
             if not matches:
                 st.error(f'Required ICE product {code} is missing from the selected file. Select another pricing file.');st.stop()
-            selected=st.selectbox(f'{code}: {weight:.0%} of supply price',matches,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'{key}_outright_{code}')
+            selected=st.selectbox(f'{code}: component multiplier {weight:.0%}',matches,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'{key}_curve_component_{code}')
             choices.append(selected)
             piece=curve(prices,asof,[selected],months)['component_1']
             route_prices[route]=route_prices[route]+weight*piece
-        st.caption('Supply price = '+ ' + '.join(f'{weight:.0%} × {code}' for code,weight in weights.items())+'. These are outright settlements; Henry Hub is not added again. Missing months leave the affected term unavailable.')
+        st.caption('Supply price = '+ ' + '.join(f'{weight:.0%} × {code}' for code,weight in weights.items())+'. Henry Hub is included once. Columbia blends 90% TCO and 10% REX basis/index components. Missing months leave the affected term unavailable.')
         x,y,z=st.columns(3)
         ft_basis=x.selectbox('FT reservation-rate basis',['Daily','Monthly'],key=key+'_ft_basis',help='Daily: daily capacity × rate × calendar days. Monthly: daily capacity × monthly reservation rate.')
         commodity=y.number_input('Transportation ($/purchased MMBtu; all campaign months)',min_value=0.,value=(.30 if utility=='Columbia Gas of Ohio' else (.285 if 'East' in route else .35)),step=.01,key=key+'_commodity')
@@ -628,7 +660,7 @@ if q['storage_transferred_volume']>0:
     st.info(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu remains for transfer (book cost ${q['storage_transferred_book']:,.2f}). Terminal transfer cash is $0. The contract retains the funded gas cost.")
 st.subheader('What goes into this offer price')
 volume=q['contract_volume']
-components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage gas',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum()))]
+components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage funding allocated to sales',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum()))]
 cost=sum(v for label,v in components)
 components.extend([('Total modeled cost / break-even',cost),('Profit at selected offer',q['contract_revenue']-cost),('Selected customer offer revenue',q['contract_revenue'])])
 bridge=pd.DataFrame([{'Price component':label,'Contract dollars':v,'$/sold MMBtu':v/volume} for label,v in components])
@@ -647,10 +679,18 @@ with st.expander('Investment cash flows and NPV audit'):
 st.download_button('Download utility monthly economics',m.reset_index().to_csv(index=False).encode(),'Ohio_Monthly_Economics.csv','text/csv')
 st.download_button('Download term offers',pd.DataFrame([r[0] for r in results.values()]).to_csv(index=False).encode(),'Ohio_Term_Offers.csv','text/csv')
 st.download_button('Download investment cash-flow audit',audit.to_csv(index=False).encode(),'Ohio_Investment_Cashflows.csv','text/csv')
-try:
-    pdf=ohio_pdf(utility,str(start),str(pd.Timestamp(asof).date()),file,q,results,configs,route_meta)
-    st.download_button('Download Ohio deal summary PDF',pdf,'Ohio_Deal_Summary.pdf','application/pdf')
-except ImportError:st.info('Add reportlab to requirements.txt to enable PDF export.')
+with st.container(border=True):
+    st.subheader('Download '+utility+' campaign economics')
+    st.caption('Utility PDF: campaign summary, all six term offers, profit per customer, selected-price economics, cost breakdown and storage assumptions.')
+    a,b,c=st.columns(3)
+    report_name=a.text_input('Report / campaign name',value=st.session_state.get('oh_name') or 'Ohio acquisition campaign',key=f'oh_{uid}_report_name')
+    report_broker=b.text_input('Broker',key=f'oh_{uid}_report_broker')
+    report_due=c.date_input('Offer due date',value=None,key=f'oh_{uid}_report_due')
+    try:
+        report=dict(name=report_name,broker=report_broker,due=str(report_due) if report_due else 'Not specified',bridge=bridge.to_dict('records'),assumptions=f'Target margin ${margin:.4f}/MMBtu; capital hurdle {capital:.2%}; financing {fin_days:g} days; additional overhead ${overhead_series.iloc[:selected_term].sum():,.2f} over the selected term. Capacity shortfall against entered FT envelope: {q["shortfall_volume"]:,.0f} MMBtu.')
+        pdf=ohio_pdf(utility,str(start),str(pd.Timestamp(asof).date()),file,q,results,configs,route_meta,report)
+        st.download_button('Download professional campaign summary (PDF)',pdf,('Columbia_Campaign_Economics.pdf' if uid=='cgo' else 'DEO_Campaign_Economics.pdf'),'application/pdf',use_container_width=True)
+    except ImportError:st.info('Add reportlab to requirements.txt to enable PDF export.')
 # Capture term price controls created later in this run as part of the saved workstream.
 for k,v in st.session_state.items():
     if k.startswith(f'oh_{uid}_') and persistent_ohio_widget(k):

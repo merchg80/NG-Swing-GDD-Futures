@@ -167,6 +167,11 @@ def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, 
     audit=pd.DataFrame({'month_number':range(n+1),'net_cashflow':cash})
     audit['discount_factor']=1/(1+discount)**(audit.month_number/12)
     audit['present_value']=audit.net_cashflow*audit.discount_factor
+    counts=[c.get('utility_customer_count', (c.get('campaign') or {}).get('customers')) for c in configs.values()]
+    counts=[float(c) for c in counts if c is not None]
+    if counts and (any(not np.isfinite(c) or c<=0 for c in counts) or any(abs(c-counts[0])>1e-8 for c in counts)):raise ValueError('Enter one consistent positive utility customer count.')
+    customer_count=counts[0] if counts else None
+    summary.update(customer_count=customer_count,contract_profit_per_customer=profit/customer_count if customer_count else None,annual_profit_per_customer=profit*12/n/customer_count if customer_count else None)
     return summary,m,details,meta,audit
 
 import base64
@@ -248,6 +253,9 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta):
         t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#edf4f1')),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#bdcec8')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));return t
     story=[Image(BytesIO(get_logo_bytes()),width=280,height=280*402/2096),Spacer(1,10),Paragraph('OHIO UTILITY ECONOMICS',styles['Heading2']),p(utility),p(f'Start {start} | Detailed term {q["term"]} months | Settlements {asof}'),Spacer(1,12)]
     rows=[['Selected-term metric','Value','Selected-term metric','Value'],['All-in price',f'${q["offer_price"]:.4f}/MMBtu','Annualized revenue',money(q['annual_revenue'])],['Operating break-even',f'${q["operating_break_even"]:.4f}/MMBtu','NPV-zero price',f'${q["npv_zero_price"]:.4f}/MMBtu'],['Contract volume',f'{q["contract_volume"]:,.0f} MMBtu','Contract overhead',money(q['overhead'])],['Profit after overhead',money(q['contract_profit']),'Annualized profit',money(q['annual_profit'])],[f'NPV @ {q["discount"]:.2%}',money(q['npv']),'Term IRR',f'{q["term_irr"]:.2%}' if q['term_irr'] is not None else 'N/A'],['Upfront credit',money(q['credit']),'Opening storage cash',money(q['opening_inventory_cash'])],['Terminal credit recovery',money(q['credit_recovery']),'Terminal storage sale',money(q['terminal_storage_proceeds'])]]
+    if q.get('customer_count'):
+        rows.append(['Contract profit / customer',f"${q['contract_profit_per_customer']:,.2f}",'Annualized profit / customer',f"${q['annual_profit_per_customer']:,.2f}"])
+        rows.append(['Campaign customers',f"{q['customer_count']:,.0f}",'Per-customer basis','Total utility campaign'])
     for route,config in configs.items():
         story.append(p(route+' storage at term end: '+config.get('terminal_mode','Sell at final forward price')))
     if q.get('storage_transferred_volume',0)>0:story.append(p(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu; book cost {money(q['storage_transferred_book'])}. No terminal transfer proceeds or inventory credit; funded gas remains a contract cost."))
@@ -316,7 +324,7 @@ st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2
 a,b,c=st.columns([1,3,1])
 with b:st.image(get_logo_bytes(),width=520)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-05 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-06 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -428,6 +436,8 @@ if campaign_active:
         for route,profile in campaign_profiles.items():
             st.write(route);st.dataframe(profile,hide_index=True)
             st.download_button('Download '+route+' campaign CSV',profile.to_csv(index=False),file_name='campaign_'+route.split(' ')[0]+'.csv',key=f'oh_{uid}_{route}_campaign_csv')
+manual_customer_count=None
+if not campaign_active:manual_customer_count=st.number_input('Utility customer count for per-customer economics',min_value=1,value=500,step=50,key=f'oh_{uid}_manual_customers')
 summary_box=st.container()
 st.subheader('Shared commercial inputs')
 a,b,c,d=st.columns(4)
@@ -509,7 +519,7 @@ for r_index,route in enumerate(routes):
             edited['commodity_rate']=commodity;edited['opex_rate']=opex_hurdle
         schedules[route]=edited
         st.session_state.setdefault('_oh_inputs',{}).setdefault(uid,{})[route]=json.loads(edited.to_json(orient='records',date_format='iso'))
-        configs[route]=dict(campaign=(dict(customers=customers,east_share=east_share,residential_share=residential,normal_baseline='2016–2025 ERA5 coordinate-based',opex_hurdle=opex_hurdle) if campaign_active else None),price_weights=weights,ft_basis=ft_basis,opening_inventory=opening,opening_unit_cost=opening_cost,storage_capacity=storage_capacity,terminal_mode=terminal,components=choices,index_treatment=index_mode,index_override=None if index_mode=='Use file settlements' else index_override)
+        configs[route]=dict(utility_customer_count=customers if campaign_active else manual_customer_count,campaign=(dict(customers=customers,east_share=east_share,residential_share=residential,normal_baseline='2016–2025 ERA5 coordinate-based',opex_hurdle=opex_hurdle) if campaign_active else None),price_weights=weights,ft_basis=ft_basis,opening_inventory=opening,opening_unit_cost=opening_cost,storage_capacity=storage_capacity,terminal_mode=terminal,components=choices,index_treatment=index_mode,index_override=None if index_mode=='Use file settlements' else index_override)
 
 st.subheader('Monthly overhead allocation')
 overhead_frame=pd.DataFrame({'month':months,'overhead':float(overhead_seed or 0.)})
@@ -560,8 +570,8 @@ with summary_box:
         for n in TERMS:
             if n in model_results:
                 target_q=model_results[n][0]
-                model_rows.append({'Term months':n,'Margin-based offer $/MMBtu':target_q['target_price'],'Target margin $/MMBtu':margin,'Annual profit $':target_q['annual_profit'],'Contract profit $':target_q['contract_profit'],'NPV $':target_q['npv'],'Term IRR':target_q['term_irr']})
-        st.dataframe(pd.DataFrame(model_rows).style.format({'Margin-based offer $/MMBtu':'${:,.4f}','Target margin $/MMBtu':'${:,.4f}','Annual profit $':'${:,.0f}','Contract profit $':'${:,.0f}','NPV $':'${:,.0f}','Term IRR':'{:.2%}'},na_rep='N/A'),hide_index=True,use_container_width=True)
+                model_rows.append({'Term months':n,'Margin-based offer $/MMBtu':target_q['target_price'],'Target margin $/MMBtu':margin,'Annual profit $':target_q['annual_profit'],'Contract profit $':target_q['contract_profit'],'Annual profit/customer $':target_q['annual_profit_per_customer'],'Contract profit/customer $':target_q['contract_profit_per_customer'],'NPV $':target_q['npv'],'Term IRR':target_q['term_irr']})
+        st.dataframe(pd.DataFrame(model_rows).style.format({'Margin-based offer $/MMBtu':'${:,.4f}','Target margin $/MMBtu':'${:,.4f}','Annual profit $':'${:,.0f}','Contract profit $':'${:,.0f}','Annual profit/customer $':'${:,.2f}','Contract profit/customer $':'${:,.2f}','NPV $':'${:,.0f}','Term IRR':'{:.2%}'},na_rep='N/A'),hide_index=True,use_container_width=True)
         st.markdown('**Test an offer price for each term**')
         cols=st.columns(3)
         for i,n in enumerate(TERMS):
@@ -580,6 +590,8 @@ with summary_box:
                 st.metric(f'NPV @ {discount:.1%}',f"${q['npv']:,.0f}")
                 st.metric('Term IRR',f"{q['term_irr']:.2%}" if q['irr'] is not None else 'N/A')
                 st.metric('Annualized profit',f"${q['annual_profit']:,.0f}")
+                st.metric('Contract profit / customer',f"${q['contract_profit_per_customer']:,.2f}" if q['contract_profit_per_customer'] is not None else 'N/A')
+                st.metric('Annualized profit / customer',f"${q['annual_profit_per_customer']:,.2f}" if q['annual_profit_per_customer'] is not None else 'N/A')
                 st.metric('Spread after overhead',f"${q['spread']:,.4f}")
                 st.caption(f"Credit ${q['credit']:,.0f}; opening gas ${q['opening_inventory_cash']:,.0f}. Credit returns in month {n} when enabled.")
                 if q['shortfall_volume']>0:st.warning(f"{q['shortfall_volume']:,.0f} MMBtu above entered FT envelope; review capacity.")
@@ -596,6 +608,11 @@ try:
 except ValueError as e:st.error(f'{selected_term}-month detail unavailable: {e}');st.stop()
 q,m,paths,route_meta,audit=detail
 st.subheader(f'{selected_term}-month detailed economics')
+cols=st.columns(3)
+cols[0].metric('Campaign customers',f"{q['customer_count']:,.0f}" if q['customer_count'] else 'N/A')
+cols[1].metric('Contract profit / customer',f"${q['contract_profit_per_customer']:,.2f}" if q['contract_profit_per_customer'] is not None else 'N/A')
+cols[2].metric('Annualized profit / customer',f"${q['annual_profit_per_customer']:,.2f}" if q['annual_profit_per_customer'] is not None else 'N/A')
+st.caption('Per-customer profit uses the total utility campaign count once, including both DEO territories. Annualized profit/customer = contract profit/customer × 12 ÷ term months. These values follow the selected offer price.')
 cols=st.columns(4)
 for col,label,value in zip(cols,['Annualized revenue','Contract volume','Operating break-even','NPV-zero all-in price'],[f"${q['annual_revenue']:,.0f}",f"{q['contract_volume']:,.0f} MMBtu",f"${q['operating_break_even']:.4f}",f"${q['npv_zero_price']:.4f}"]):col.metric(label,value)
 cols=st.columns(4)

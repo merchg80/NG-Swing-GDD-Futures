@@ -156,7 +156,8 @@ def route_build(schedule, supply_prices, config):
     supply_credit=float(result.purchases.max()*max(0,result.supply_price.max()))
     return result,dict(opening_inventory_cost=opening*opening_unit,terminal_storage_proceeds=terminal_sale,terminal_storage_gain=terminal_gain,ft_credit=ft_credit,supply_credit=supply_credit,ending_inventory=inventory,ending_inventory_book=book,terminal_mode=terminal_mode,transferred_inventory=inventory if terminal_mode=='Storage transfer' else 0.,transferred_inventory_book=book if terminal_mode=='Storage transfer' else 0.)
 
-def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, capital_hurdle=.08, financing_days=30, manual_credit=None, return_credit=True, quote=None):
+def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, capital_hurdle=.08, financing_days=30, manual_credit=None, return_credit=True, quote=None, sales_tax_rate=0.):
+    if not np.isfinite(sales_tax_rate) or not 0<=sales_tax_rate<1:raise ValueError('Sales tax rate must be between 0% and less than 100%.')
     if margin is None or not np.isfinite(margin):raise ValueError('Enter the target margin.')
     if discount<0 or capital_hurdle<0 or financing_days<0:raise ValueError('Rates and financing days must be nonnegative.')
     details={};meta={}
@@ -180,10 +181,14 @@ def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, 
     volume=float(m.sales.sum())
     if volume<=0:raise ValueError('Enter customer sales volumes above zero.')
     operating_floor=float((m.cash_cost.sum()+initial_inventory-terminal_storage)/volume)
-    target=operating_floor+float(margin)
+    target=(operating_floor+float(margin))/(1-sales_tax_rate)
+    operating_floor=operating_floor/(1-sales_tax_rate)
     fixed=target if quote is None else float(quote)
     m['customer_price']=fixed;m['revenue']=m.sales*fixed
-    m['accounting_profit']=m.revenue-m.accounting_operating_cost-m.overhead-m.capital_cost
+    m['sales_tax']=m.revenue*sales_tax_rate
+    m['net_sales_revenue']=m.revenue-m.sales_tax
+    m['cash_cost']=m.cash_cost+m.sales_tax
+    m['accounting_profit']=m.net_sales_revenue-m.accounting_operating_cost-m.overhead-m.capital_cost
     m['operating_cashflow']=m.revenue-m.cash_cost
     m['storage_terminal_cashflow']=0.;m.iloc[-1,m.columns.get_loc('storage_terminal_cashflow')]=terminal_storage
     m['credit_cashflow']=0.;m.iloc[-1,m.columns.get_loc('credit_cashflow')]=credit_recovery
@@ -192,15 +197,15 @@ def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, 
     cash=np.r_[-initial_outflow,m.net_investment_cashflow.to_numpy()]
     npv,irr,status=monthly_returns(cash,discount)
     pv_volume=float(sum(v/(1+discount)**((i+1)/12) for i,v in enumerate(m.sales)))
-    cash_without_revenue=np.r_[-initial_outflow,(-m.cash_cost+m.storage_terminal_cashflow+m.credit_cashflow).to_numpy()]
+    cash_without_revenue=np.r_[-initial_outflow,(-m.cash_cost+m.sales_tax+m.storage_terminal_cashflow+m.credit_cashflow).to_numpy()]
     pv_cost=-monthly_returns(cash_without_revenue,discount)[0]
-    npv_floor=pv_cost/pv_volume
+    npv_floor=pv_cost/(pv_volume*(1-sales_tax_rate))
     profit=float(m.operating_cashflow.sum()-initial_inventory+terminal_storage)
     accounting_profit=float(m.accounting_profit.sum()+sum(x['terminal_storage_gain'] for x in meta.values()))
     if abs(profit-accounting_profit)>max(1e-5,abs(profit)*1e-9):raise ValueError('Inventory cash and profit reconciliation failed.')
     n=len(m)
     term_irr=(1+irr)**(n/12)-1 if irr is not None else None
-    summary=dict(storage_transferred_volume=sum(x['transferred_inventory'] for x in meta.values()),storage_transferred_book=sum(x['transferred_inventory_book'] for x in meta.values()),term_irr=term_irr,term=n,target_price=target,offer_price=fixed,operating_break_even=operating_floor,npv_zero_price=npv_floor,contract_volume=volume,annual_revenue=float(m.revenue.sum()*12/n),contract_revenue=float(m.revenue.sum()),contract_profit=profit,annual_profit=profit*12/n,spread=profit/volume,gross_margin=profit/m.revenue.sum() if m.revenue.sum()>0 else None,npv=npv,irr=irr,irr_status=status,credit=credit,auto_credit=auto_credit,opening_inventory_cash=initial_inventory,total_initial_cash=initial_outflow,credit_recovery=credit_recovery,terminal_storage_proceeds=terminal_storage,overhead=float(m.overhead.sum()),shortfall_volume=float(m.ft_shortfall_month.sum()),discount=discount)
+    summary=dict(sales_tax_rate=sales_tax_rate,contract_sales_tax=float(m.sales_tax.sum()),contract_net_sales=float(m.net_sales_revenue.sum()),storage_transferred_volume=sum(x['transferred_inventory'] for x in meta.values()),storage_transferred_book=sum(x['transferred_inventory_book'] for x in meta.values()),term_irr=term_irr,term=n,target_price=target,offer_price=fixed,operating_break_even=operating_floor,npv_zero_price=npv_floor,contract_volume=volume,annual_revenue=float(m.revenue.sum()*12/n),contract_revenue=float(m.revenue.sum()),contract_profit=profit,annual_profit=profit*12/n,spread=profit/volume,gross_margin=profit/m.revenue.sum() if m.revenue.sum()>0 else None,npv=npv,irr=irr,irr_status=status,credit=credit,auto_credit=auto_credit,opening_inventory_cash=initial_inventory,total_initial_cash=initial_outflow,credit_recovery=credit_recovery,terminal_storage_proceeds=terminal_storage,overhead=float(m.overhead.sum()),shortfall_volume=float(m.ft_shortfall_month.sum()),discount=discount)
     audit=pd.DataFrame({'month_number':range(n+1),'net_cashflow':cash})
     audit['discount_factor']=1/(1+discount)**(audit.month_number/12)
     audit['present_value']=audit.net_cashflow*audit.discount_factor
@@ -303,23 +308,25 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
     name=report.get('name') or 'Ohio acquisition campaign'
     story=header(name)
     story.extend([p(f"Delivery start: {start} | Selected term: {q['term']} months | Settlements: {asof}"),p(f"Broker: {report.get('broker') or 'Not specified'} | Offer due: {report.get('due') or 'Not specified'}"),p('Prepared '+datetime.now(ZoneInfo('America/Chicago')).strftime('%b %d, %Y %I:%M %p CT')),Spacer(1,10)])
-    story.extend(heading('Campaign term offers'))
-    rows=[['Term','Margin target $/MMBtu','Tested offer $/MMBtu','Annual profit','Contract profit','Annual profit / cust.','NPV','Term IRR']]
+    model=report.get('model_results') or results
+    actual=report.get('actual_results',{})
+    story.extend(heading('Model-required versus actual offers'))
+    rows=[['Term','Model price','Actual price','Model annual profit','Actual annual profit','Model annual profit / cust.','Actual annual profit / cust.']]
+    returns=[['Term','Model NPV','Actual NPV','Model term IRR','Actual term IRR']]
     for n in [6,12,18,24,36,48]:
-        if n not in results:rows.append([f'{n} mo.','Unavailable','Missing inputs','','','','','']);continue
-        x=results[n][0]
-        rows.append([f'{n} mo.',money(x['target_price'],4),money(x['offer_price'],4),money(x['annual_profit']),money(x['contract_profit']),money(x.get('annual_profit_per_customer'),2),money(x['npv']),percent(x['term_irr'])])
-    story.append(table(rows,[36,66,66,64,72,74,76,74],highlights=(3,4)))
-    story.extend([Spacer(1,8),p('Target prices use the selected margin. Tested offers and their economics follow each term card. The selected detailed offer above may have its own manual price. Annualized profit is contract profit x 12 / term months; per-customer figures use the total utility campaign count once.')])
-    story.extend(heading('Selected campaign offer'))
-    metrics=[('Selected all-in offer',money(q['offer_price'],4)+'/MMBtu'),('Contract profit',money(q['contract_profit'])),('Annualized profit',money(q['annual_profit'])),('Campaign customers',f"{q.get('customer_count',0) or 0:,.0f}"),('Contract profit / customer',money(q.get('contract_profit_per_customer'),2)),('Annual profit / customer',money(q.get('annual_profit_per_customer'),2))]
-    cards=[]
-    for offset in [0,3]:
-        cards.append([Paragraph(escape(label)+'<br/><b>'+escape(value)+'</b>',styles['ValueOH']) for label,value in metrics[offset:offset+3]])
-    card=Table(cards,colWidths=[176]*3)
-    card.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),pale),('BOX',(0,0),(-1,-1),1,wine),('INNERGRID',(0,0),(-1,-1),1,colors.white),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),10),('BOTTOMPADDING',(0,0),(-1,-1),10)]));story.append(card)
-    story.extend(heading('Selected-offer investment and margin'))
-    story.append(table([['Contract volume','NPV @ '+percent(q['discount']),'Term IRR','Net spread','Gross margin'],[f"{q['contract_volume']:,.0f} MMBtu",money(q['npv']),percent(q['term_irr']),money(q['spread'],4)+'/MMBtu',percent(q['gross_margin'])]],[116,116,90,112,94]))
+        if n not in model:
+            rows.append([f'{n} mo.','Unavailable','','','','','']);returns.append([f'{n} mo.','Unavailable','','','']);continue
+        x=model[n][0];y=actual[n][0] if n in actual else None
+        rows.append([f'{n} mo.',money(x['target_price'],4),money(y['offer_price'],4) if y else 'Not entered',money(x['annual_profit']),money(y['annual_profit']) if y else '-',money(x.get('annual_profit_per_customer'),2),money(y.get('annual_profit_per_customer'),2) if y else '-'])
+        returns.append([f'{n} mo.',money(x['npv']),money(y['npv']) if y else '-',percent(x['term_irr']),percent(y['term_irr']) if y else '-'])
+    story.append(table(rows,[36,72,72,84,84,90,90],highlights=(4,6)))
+    story.extend(heading('Investment return comparison'))
+    story.append(table(returns,[56,118,118,118,118]))
+    story.extend([Spacer(1,7),p('Model offers achieve the selected target spread. Actual-offer economics use the entered customer prices with identical cost and load assumptions. Blank actual offers remain unquoted. Annual profit/customer uses the total utility campaign count once.')])
+    story.extend(heading('Selected detailed offer - '+str(q['term'])+' months'))
+    story.append(table([['All-in price','Contract profit','Annual profit','Annual profit / customer'],[money(q['offer_price'],4),money(q['contract_profit']),money(q['annual_profit']),money(q.get('annual_profit_per_customer'),2)]],[132]*4))
+    story.append(p(f"Monthly sales tax deduction: {q.get('sales_tax_rate',0):.2%}; total contract deduction {money(q.get('contract_sales_tax',0))}. Profit is after this deduction."))
+    story.append(p('The selected detail follows the actual table when populated, or its separate manual override. NPV discount rate: '+percent(q['discount'])+'.'))
     story.append(PageBreak());story.extend([p('Price construction and assumptions','TitleOH'),p(name+' | '+utility)])
     bridge=report.get('bridge') or []
     if bridge:
@@ -390,7 +397,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-11 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-13 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -516,13 +523,15 @@ if not campaign_active:manual_customer_count=st.number_input('Utility customer c
 summary_box=st.container()
 st.subheader('Shared commercial inputs')
 a,b,c,d=st.columns(4)
-margin=a.number_input('Target margin after overhead ($/MMBtu)',value=.18,step=.01,format='%.4f',key=f'oh_{uid}_margin')
+margin=a.number_input('Target margin after costs and sales tax ($/MMBtu)',value=.30,step=.01,format='%.4f',key=f'oh_{uid}_margin')
 overhead_seed=b.number_input('Additional overhead above OPEX hurdle ($/month)',value=0.,min_value=0.,step=100.,key=f'oh_{uid}_overhead')
 capital=c.number_input('Annual capital charge (%)',value=8.,min_value=0.,step=.5,key=f'oh_{uid}_capital')/100
 fin_days=d.number_input('Cash financing days',value=30.,min_value=0.,step=1.,key=f'oh_{uid}_days')
 st.caption('Campaign OPEX already includes the per-MMBtu overhead hurdle ($2.00 Columbia / $0.65 DEO). Additional overhead starts at $0 to avoid charging it twice. Brokerage, FT reservations and storage service fees have no established campaign defaults and remain explicit optional inputs. Fuel starts at the workbook’s 4% assumption (4.1% West), modeled as retention gross-up. Monthly overhead is the amount allocated to this utility, not an unallocated company total. It is charged once to the utility, including when Enbridge has two supply paths. No workforce cost is assumed beyond your entry. The target margin is additional to overhead and the modeled capital charge.')
 a,b,c,d=st.columns(4)
-discount=a.number_input('NPV annual discount rate (%)',value=10.,min_value=0.,step=.5,key=f'oh_{uid}_discount')/100
+discount=a.number_input('NPV annual discount rate (%)',value=20.,min_value=0.,step=.5,key=f'oh_{uid}_discount')/100
+sales_tax_rate=st.number_input('Monthly sales tax deduction (% of customer sales)',min_value=0.,max_value=99.,value=5.75,step=.05,key=f'oh_{uid}_sales_tax')/100
+st.caption('Sales tax is deducted monthly from gross customer revenue. Model-required offers recover this deduction before the target $/MMBtu profit. No tax is deducted from collateral recovery or storage transfer.')
 credit_mode=b.selectbox('Upfront credit',['Automatic','Manual'],key=f'oh_{uid}_credit_mode')
 manual_credit=c.number_input('Manual credit cash ($)',min_value=0.,value=0.,step=100.,key=f'oh_{uid}_credit') if credit_mode=='Manual' else None
 return_credit=d.checkbox('Return credit at term end',value=True,key=f'oh_{uid}_recover')
@@ -649,7 +658,7 @@ if margin is None or overhead_seed is None or not confirmed:
 
 def run(n,offer=None):
     ms=months[:n]
-    return evaluate_utility({r:s.iloc[:n] for r,s in schedules.items()},{r:x.reindex(ms) for r,x in route_prices.items()},configs,overhead_series.reindex(ms),margin,discount,capital,fin_days,manual_credit,return_credit,offer)
+    return evaluate_utility({r:s.iloc[:n] for r,s in schedules.items()},{r:x.reindex(ms) for r,x in route_prices.items()},configs,overhead_series.reindex(ms),margin,discount,capital,fin_days,manual_credit,return_credit,offer,sales_tax_rate=sales_tax_rate)
 results={};errors={};model_results={}
 for n in TERMS:
     try:
@@ -665,35 +674,35 @@ with summary_box:
                 target_q=model_results[n][0]
                 model_rows.append({'Term months':n,'Margin-based offer $/MMBtu':target_q['target_price'],'Target margin $/MMBtu':margin,'Annual profit $':target_q['annual_profit'],'Contract profit $':target_q['contract_profit'],'Annual profit/customer $':target_q['annual_profit_per_customer'],'Contract profit/customer $':target_q['contract_profit_per_customer'],'NPV $':target_q['npv'],'Term IRR':target_q['term_irr']})
         st.dataframe(pd.DataFrame(model_rows).style.format({'Margin-based offer $/MMBtu':'${:,.4f}','Target margin $/MMBtu':'${:,.4f}','Annual profit $':'${:,.0f}','Contract profit $':'${:,.0f}','Annual profit/customer $':'${:,.2f}','Contract profit/customer $':'${:,.2f}','NPV $':'${:,.0f}','Term IRR':'{:.2%}'},na_rep='N/A'),hide_index=True,use_container_width=True)
-        st.markdown('**Test an offer price for each term**')
-        cols=st.columns(3)
-        for i,n in enumerate(TERMS):
-            col=cols[i%3]
-            with col:
-                st.markdown(f'### {n} months')
-                if n not in results:st.caption('Unavailable: '+errors[n]);continue
-                target=results[n][0]['target_price']
-                mode=st.selectbox('Offer setting',['Model target','Target less $0.10','Target less $0.20','Manual'],key=f'oh_{uid}_mode_{n}')
-                offer=None
-                if mode=='Manual':offer=st.number_input('All-in $/MMBtu',value=float(target),step=.01,format='%.4f',key=f'oh_{uid}_offer_{n}')
-                elif mode!='Model target':offer=target-(.1 if mode=='Target less $0.10' else .2)
-                results[n]=run(n,offer);q=results[n][0]
-                st.caption(f"Margin-based target: ${target:,.4f}/MMBtu")
-                st.metric('All-in price',f"${q['offer_price']:,.4f}")
-                st.metric(f'NPV @ {discount:.1%}',f"${q['npv']:,.0f}")
-                st.metric('Term IRR',f"{q['term_irr']:.2%}" if q['irr'] is not None else 'N/A')
-                st.metric('Annualized profit',f"${q['annual_profit']:,.0f}")
-                st.metric('Contract profit / customer',f"${q['contract_profit_per_customer']:,.2f}" if q['contract_profit_per_customer'] is not None else 'N/A')
-                st.metric('Annualized profit / customer',f"${q['annual_profit_per_customer']:,.2f}" if q['annual_profit_per_customer'] is not None else 'N/A')
-                st.metric('Spread after overhead',f"${q['spread']:,.4f}")
-                st.caption(f"Credit ${q['credit']:,.0f}; opening gas ${q['opening_inventory_cash']:,.0f}. Credit returns in month {n} when enabled.")
-                if q['shortfall_volume']>0:st.warning(f"{q['shortfall_volume']:,.0f} MMBtu above entered FT envelope; review capacity.")
-        st.caption('All terms use the exact 48-month schedules entered below, truncated to each term. Overhead, capacity and storage months are not automatically repeated or interpolated. Each term has its own initial credit and terminal storage close-out. All-in price includes every modeled charge; no utility delivery tariff or tax is added unless entered in costs.')
+        st.markdown('**Actual offers - enter customer prices below**')
+        actual_key=f'oh_{uid}_actual_prices'
+        retained=st.session_state.get(actual_key,[])
+        saved_prices={int(r['Term months']):r.get('Actual offer $/MMBtu') for r in retained}
+        entries=pd.DataFrame([{'Term months':n,'Model required $/MMBtu':model_results[n][0]['target_price'] if n in model_results else None,'Actual offer $/MMBtu':saved_prices.get(n)} for n in TERMS])
+        edited_offers=st.data_editor(entries,hide_index=True,disabled=['Term months','Model required $/MMBtu'],key=f'ohgrid_actual_{uid}_{start}_{seed_version}',use_container_width=True,column_config={'Actual offer $/MMBtu':st.column_config.NumberColumn('Actual offer $/MMBtu',format='$%.4f',step=.01),'Model required $/MMBtu':st.column_config.NumberColumn('Model required $/MMBtu',format='$%.4f')})
+        st.session_state[actual_key]=json.loads(edited_offers[['Term months','Actual offer $/MMBtu']].to_json(orient='records'))
+        actual_results={};comparison=[]
+        for row in edited_offers.to_dict('records'):
+            n=int(row['Term months']);price=row['Actual offer $/MMBtu']
+            if n not in model_results:
+                comparison.append({'Term months':n,'Status':errors.get(n,'Unavailable')});continue
+            required=model_results[n][0]
+            actual=None
+            if pd.notna(price):
+                try:actual_results[n]=run(n,float(price));actual=actual_results[n][0];results[n]=actual_results[n]
+                except ValueError as e:errors[n]=str(e)
+            comparison.append({'Term months':n,'Model price':required['target_price'],'Actual price':actual['offer_price'] if actual else None,'Price gap':actual['offer_price']-required['target_price'] if actual else None,'Model annual profit':required['annual_profit'],'Actual annual profit':actual['annual_profit'] if actual else None,'Model annual profit/customer':required['annual_profit_per_customer'],'Actual annual profit/customer':actual['annual_profit_per_customer'] if actual else None,'Model NPV':required['npv'],'Actual NPV':actual['npv'] if actual else None,'Model term IRR':required['term_irr'],'Actual term IRR':actual['term_irr'] if actual else None,'Status':'At/above target' if actual and actual['offer_price']>=required['target_price'] else ('Below target' if actual else 'Actual offer not entered')})
+        comparison_frame=pd.DataFrame(comparison)
+        st.markdown('**Required economics versus actual-offer economics**')
+        formats={c:('{:.2%}' if 'IRR' in c else ('${:,.4f}' if c in ['Model price','Actual price','Price gap'] else '${:,.2f}')) for c in comparison_frame.columns if c not in ['Term months','Status']}
+        st.dataframe(comparison_frame.style.format(formats,na_rep='Not entered'),hide_index=True,use_container_width=True)
+        st.caption('Blank actual prices are not assumed to be offers. Both cases use identical volumes, costs, funding and storage assumptions. Actual prices are saved with this workflow.')
+        st.download_button('Download model versus actual offer comparison',comparison_frame.to_csv(index=False),'Ohio_Offer_Comparison.csv','text/csv')
 st.subheader('Selected-term offer economics')
 try:
     base_detail=run(selected_term)
     a,b=st.columns(2)
-    detail_mode=a.selectbox('Detailed offer pricing',['Use term card / margin target','Manual offer price'],key=f'oh_{uid}_detail_mode')
+    detail_mode=a.selectbox('Detailed offer pricing',['Use actual offer table / model target','Manual offer price'],key=f'oh_{uid}_detail_mode')
     if detail_mode=='Manual offer price':
         detail_price=b.number_input('Customer all-in offer ($/MMBtu)',value=float(base_detail[0]['target_price']),step=.01,format='%.4f',key=f'oh_{uid}_detail_price_{selected_term}')
         detail=run(selected_term,detail_price)
@@ -715,15 +724,14 @@ if q['storage_transferred_volume']>0:
     st.info(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu remains for transfer (book cost ${q['storage_transferred_book']:,.2f}). Terminal transfer cash is $0. The contract retains the funded gas cost.")
 st.subheader('What goes into this offer price')
 volume=q['contract_volume']
-components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage funding allocated to sales',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum()))]
+components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage funding allocated to sales',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum())),('Sales tax deduction',float(m.sales_tax.sum()))]
 cost=sum(v for label,v in components)
 components.extend([('Total modeled cost / break-even',cost),('Profit at selected offer',q['contract_revenue']-cost),('Selected customer offer revenue',q['contract_revenue'])])
 bridge=pd.DataFrame([{'Price component':label,'Contract dollars':v,'$/sold MMBtu':v/volume} for label,v in components])
 st.dataframe(bridge.style.format({'Contract dollars':'${:,.2f}','$/sold MMBtu':'${:,.4f}'}),hide_index=True,use_container_width=True)
 st.caption(f"Cost ${cost/volume:.4f} + selected-price profit ${q['spread']:.4f} = offer ${q['offer_price']:.4f}/MMBtu. Target margin is ${margin:.4f}. Collateral is funding, not an operating cost; its timing is included in NPV and IRR.")
 st.download_button('Download offer price breakdown',bridge.to_csv(index=False),file_name='Ohio_Offer_Price_Breakdown.csv',key=f'oh_download_{uid}_bridge_download')
-st.line_chart(m[['revenue','cash_cost','accounting_profit']])
-st.dataframe(m.style.format({c:('${:,.2f}' if any(v in c for v in ['cost','profit','revenue','price','cashflow','overhead']) else '{:,.0f}') for c in m.select_dtypes('number')},na_rep='N/A'),use_container_width=True)
+st.dataframe(m.style.format({c:('${:,.2f}' if any(v in c for v in ['cost','profit','revenue','price','cashflow','overhead','tax']) else '{:,.0f}') for c in m.select_dtypes('number')},na_rep='N/A'),use_container_width=True)
 for route in routes:
     with st.expander(route+' | inventory and capacity audit'):
         st.dataframe(paths[route].style.format({c:('${:,.2f}' if any(v in c for v in ['cost','cogs','price','book']) else '{:,.0f}') for c in paths[route].select_dtypes('number')}),use_container_width=True)
@@ -742,7 +750,7 @@ with st.container(border=True):
     report_broker=b.text_input('Broker',key=f'oh_{uid}_report_broker')
     report_due=c.date_input('Offer due date',value=None,key=f'oh_{uid}_report_due')
     try:
-        report=dict(name=report_name,broker=report_broker,due=str(report_due) if report_due else 'Not specified',bridge=bridge.to_dict('records'),assumptions=f'Target margin ${margin:.4f}/MMBtu; capital hurdle {capital:.2%}; financing {fin_days:g} days; additional overhead ${overhead_series.iloc[:selected_term].sum():,.2f} over the selected term. Capacity shortfall against entered FT envelope: {q["shortfall_volume"]:,.0f} MMBtu.')
+        report=dict(model_results=model_results,actual_results=actual_results,name=report_name,broker=report_broker,due=str(report_due) if report_due else 'Not specified',bridge=bridge.to_dict('records'),assumptions=f'Sales tax deduction {sales_tax_rate:.2%} of monthly gross customer revenue; target margin ${margin:.4f}/MMBtu; capital hurdle {capital:.2%}; financing {fin_days:g} days; additional overhead ${overhead_series.iloc[:selected_term].sum():,.2f} over the selected term. Capacity shortfall against entered FT envelope: {q["shortfall_volume"]:,.0f} MMBtu.')
         pdf=ohio_pdf(utility,str(start),str(pd.Timestamp(asof).date()),file,q,results,configs,route_meta,report)
         st.download_button('Download professional campaign summary (PDF)',pdf,('Columbia_Campaign_Economics.pdf' if uid=='cgo' else 'DEO_Campaign_Economics.pdf'),'application/pdf',use_container_width=True)
     except ImportError:st.info('Add reportlab to requirements.txt to enable PDF export.')

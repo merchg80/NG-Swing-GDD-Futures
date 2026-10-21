@@ -37,6 +37,38 @@ def curve(prices, asof, selections, months):
         out[f'component_{i+1}'] = x.set_index('strip').settlement_price.reindex(out.index)
     return out
 
+
+def pricing_file_order(name):
+    import re
+    match=re.search(r'(20\d{2})[_-](\d{2})[_-](\d{2})',str(name))
+    return (''.join(match.groups()) if match else '',str(name))
+
+def extend_index(piece,mode,manual=None):
+    piece=piece.copy()
+    if mode=='Use file settlements only':return piece
+    if mode=='Manual value for missing index months':
+        if manual is None:raise ValueError('Enter the missing-month financial index assumption.')
+        return piece.fillna(float(manual))
+    if mode=='Carry last available index forward':return piece.ffill()
+    raise ValueError('Unknown financial index treatment.')
+
+
+def seasonal_index(history,months):
+    """Fill missing months from the prior year's same calendar month, recursively."""
+    history=history.copy().sort_index()
+    months=pd.DatetimeIndex(months)
+    if history.index.duplicated().any():raise ValueError('Duplicate monthly financial index settlements.')
+    if not len(months):return pd.Series(dtype=float,index=months)
+    available=history.dropna()
+    if available.empty:return history.reindex(months)
+    first=min(available.index.min(),months.min())
+    full=history.reindex(pd.date_range(first,max(history.index.max(),months.max()),freq='MS'))
+    for month in full.index:
+        if pd.isna(full.loc[month]):
+            prior=month-pd.DateOffset(years=1)
+            if prior in full.index and pd.notna(full.loc[prior]):full.loc[month]=full.loc[prior]
+    return full.reindex(months)
+
 """Ohio retail gas economics: explicit monthly inputs, storage cash and inventory."""
 import numpy as np
 import pandas as pd
@@ -303,6 +335,8 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
     for route,config in configs.items():
         meta=route_meta[route];weights=config.get('price_weights',{})
         pricing=' + '.join(f'{weight:.0%} {code}' for code,weight in weights.items())
+        for code,assumption in config.get('index_assumptions',{}).items():
+            story.append(p(f"{route} {code}: {assumption['treatment']}; manual value {assumption.get('manual_value')}; {assumption['projected_months']} months in the 48-month curve use projected index assumptions."))
         story.append(p(f"{route}: {pricing}. Storage close-out: {config['terminal_mode']}. Ending gas: {meta['ending_inventory']:,.1f} MMBtu; terminal proceeds: {money(meta['terminal_storage_proceeds'])}."))
     if report.get('assumptions'):story.append(p(report['assumptions']))
     story.extend([Spacer(1,7),p('Source: input/'+source),p('Weather: 2016-2025 weighted ERA5 coordinate-based daily normals; no weekday multipliers. Columbia storage uses the East design-day proxy. Opening storage is an upfront purchase, allocated over contract sales in the price table. Storage transfer retains funded gas cost without terminal proceeds or a residual credit.'),p('NPV uses the displayed effective annual discount rate converted to monthly. Term IRR compounds the monthly investment IRR over the selected term. Credit recovery and storage proceeds occur only at the actual term end. Capacity inputs require review; this is an indicative internal underwrite.')])
@@ -356,7 +390,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-10 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-11 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -431,12 +465,15 @@ uid='cgo' if utility.startswith('Columbia') else 'ego'
 routes=ROUTES[utility]
 restore=st.session_state.get('_oh_restore',{})
 inputs_dir=next((p for p in [ROOT/'input',ROOT.parent/'input'] if p.is_dir()),ROOT/'input')
-files=sorted(str(p.relative_to(inputs_dir)) for p in inputs_dir.rglob('*') if p.is_file() and p.suffix.lower() in ['.xlsx','.csv','.parquet']) if inputs_dir.is_dir() else []
+files=sorted((str(p.relative_to(inputs_dir)) for p in inputs_dir.rglob('*') if p.is_file() and p.suffix.lower() in ['.xlsx','.csv','.parquet'] and 'icecleared' in p.name.lower()),key=pricing_file_order,reverse=True) if inputs_dir.is_dir() else []
 if not files:st.info('Deploy ohio_economics.py at the root of the existing pricing repository so it can read input/.');st.stop()
 @st.cache_data(ttl=300)
 def load_prices(path,stamp):return read_prices(path)
 def choose_file():st.session_state.pop('oh_asof',None)
 if st.session_state.get('oh_pricing_file') not in files:st.session_state.pop('oh_pricing_file',None)
+if st.button('Reset to newest pricing file and default start month'):
+    for state_key in ['oh_pricing_file','oh_asof','oh_start']:st.session_state.pop(state_key,None)
+    st.rerun()
 file=st.selectbox('ICE Cleared Gas file',files,key='oh_pricing_file',on_change=choose_file)
 path=inputs_dir/file
 with st.spinner('Reading selected pricing file…'):
@@ -446,7 +483,7 @@ dates=sorted(prices.trade_date.unique(),reverse=True)
 if st.session_state.get('oh_asof') not in dates:st.session_state.pop('oh_asof',None)
 a,b,c=st.columns(3)
 asof=a.selectbox('Trade date',dates,format_func=lambda x:pd.Timestamp(x).strftime('%Y-%m-%d'),key='oh_asof')
-start=b.date_input('Contract start month',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date(),key='oh_start').replace(day=1)
+start=b.date_input('Contract start month',value=(pd.Timestamp.now(tz='America/New_York').tz_localize(None).to_period('M')+1).to_timestamp().date(),key='oh_start').replace(day=1)
 selected_term=c.slider('Detailed contract term (months)',1,48,12,key='oh_term')
 months=pd.date_range(start,periods=48,freq='MS')
 st.subheader('Acquisition campaign')
@@ -500,14 +537,32 @@ for r_index,route in enumerate(routes):
         choices=[]
         route_prices[route]=pd.Series(0.,index=months)
         index_mode='Henry Hub + basis + financial index';index_override=None
+        coverage=[];index_assumptions={}
         for j,(code,weight) in enumerate(weights.items()):
             matches=[x for x in options if x[2]==code]
             if not matches:
                 st.error(f'Required ICE product {code} is missing from the selected file. Select another pricing file.');st.stop()
             selected=st.selectbox(f'{code}: component multiplier {weight:.0%}',matches,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'{key}_curve_component_{code}')
             choices.append(selected)
+            raw=prices[(prices.trade_date==pd.Timestamp(asof))&(prices.contract==code)&(prices.hub==selected[0])&(prices['product']==selected[1])]
             piece=curve(prices,asof,[selected],months)['component_1']
+            last=raw['strip'].max()
+            coverage.append({'Code':code,'Last file delivery':str(last.date()) if pd.notna(last) else 'None','Missing requested months':int(piece.isna().sum())})
+            if code in ['DIS','TIS','REI'] and piece.isna().any():
+                treatment=st.selectbox(code+' missing-month treatment',['Prior year matching month','Use file settlements only','Carry last available index forward','Manual value for missing index months'],key=f'{key}_{code}_extension')
+                assumption=None
+                if treatment=='Manual value for missing index months':assumption=st.number_input(code+' missing-month index ($/MMBtu)',value=None,step=.001,format='%.4f',key=f'{key}_{code}_manual_extension')
+                original=piece.copy()
+                if treatment=='Prior year matching month':
+                    piece=seasonal_index(raw.set_index('strip').settlement_price,months)
+                elif treatment=='Carry last available index forward':
+                    full=raw.set_index('strip').settlement_price.sort_index()
+                    piece=full.reindex(full.index.union(months)).sort_index().ffill().reindex(months)
+                else:piece=extend_index(piece,treatment,assumption) if assumption is not None or treatment=='Use file settlements only' else piece
+                index_assumptions[code]=dict(treatment=treatment,manual_value=assumption,projected_months=int((original.isna() & piece.notna()).sum()))
+                if treatment!='Use file settlements only':st.caption(code+': missing financial index months use a modeled assumption, not ICE settlements.')
             route_prices[route]=route_prices[route]+weight*piece
+        st.dataframe(pd.DataFrame(coverage),hide_index=True)
         st.caption('Supply price = '+ ' + '.join(f'{weight:.0%} × {code}' for code,weight in weights.items())+'. Henry Hub is included once. Columbia blends 90% TCO and 10% REX basis/index components. Missing months leave the affected term unavailable.')
         x,y,z=st.columns(3)
         ft_basis=x.selectbox('FT reservation-rate basis',['Daily','Monthly'],key=key+'_ft_basis',help='Daily: daily capacity × rate × calendar days. Monthly: daily capacity × monthly reservation rate.')
@@ -523,7 +578,7 @@ for r_index,route in enumerate(routes):
         else:opening_cost=first_supply if first_supply is not None else 0.
         x,y=st.columns(2)
         storage_capacity=x.number_input('Storage capacity (MMBtu; blank if unspecified)',min_value=0.,value=None,step=100.,key=key+'_storage_capacity')
-        terminal=y.selectbox('Storage at each term end',['Sell at final forward price','Require zero inventory','Storage transfer'],key=key+'_terminal')
+        terminal=y.selectbox('Storage at each term end',['Storage transfer','Sell at final forward price','Require zero inventory'],key=key+'_terminal')
         st.caption('Terminal sale is a modeling assumption, not a guaranteed sale. It liquidates remaining storage at that path’s last forward price, producing cash at the end of each evaluated term. Require zero inventory blocks terms that end with gas in storage. Storage transfer retains the ending physical inventory for transfer: no sale proceeds, transfer payment or terminal cash entry. Gas funded by this contract remains in its net cost; no residual inventory credit is added to profit, NPV or IRR.')
         if campaign_active:
             opening=campaign_meta[route]['opening_inventory'];storage_capacity=campaign_meta[route]['storage_capacity']
@@ -557,7 +612,7 @@ for r_index,route in enumerate(routes):
             edited['commodity_rate']=commodity;edited['opex_rate']=opex_hurdle
         schedules[route]=edited
         st.session_state.setdefault('_oh_inputs',{}).setdefault(uid,{})[route]=json.loads(edited.to_json(orient='records',date_format='iso'))
-        configs[route]=dict(utility_customer_count=customers if campaign_active else manual_customer_count,campaign=(dict(customers=customers,east_share=east_share,residential_share=residential,normal_baseline='2016–2025 ERA5 coordinate-based',opex_hurdle=opex_hurdle) if campaign_active else None),price_weights=weights,ft_basis=ft_basis,opening_inventory=opening,opening_unit_cost=opening_cost,storage_capacity=storage_capacity,terminal_mode=terminal,components=choices,index_treatment=index_mode,index_override=None if index_mode=='Use file settlements' else index_override)
+        configs[route]=dict(utility_customer_count=customers if campaign_active else manual_customer_count,campaign=(dict(customers=customers,east_share=east_share,residential_share=residential,normal_baseline='2016–2025 ERA5 coordinate-based',opex_hurdle=opex_hurdle) if campaign_active else None),index_assumptions=index_assumptions,price_weights=weights,ft_basis=ft_basis,opening_inventory=opening,opening_unit_cost=opening_cost,storage_capacity=storage_capacity,terminal_mode=terminal,components=choices,index_treatment=index_mode,index_override=None if index_mode=='Use file settlements' else index_override)
 
 st.subheader('Monthly overhead allocation')
 overhead_frame=pd.DataFrame({'month':months,'overhead':float(overhead_seed or 0.)})

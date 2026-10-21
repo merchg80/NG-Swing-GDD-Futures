@@ -109,13 +109,15 @@ def route_build(schedule, supply_prices, config):
         cogs=gross_direct*row.supply_price+withdrawal_cogs
         records.append(dict(month=row.month,sales=row.sales,days=days,supply_price=row.supply_price,purchases=purchases,purchase_cost=purchase_cost,gas_cogs=cogs,ft_capacity_day=row.ft_capacity_day,ft_cost=ft_cost,commodity_cost=commodity,brokerage_cost=brokerage,storage_cost=storage_cost,opex_cost=opex,opening_inventory=initial_inventory,injection=row.injection,credited_injection=credited_injection,withdrawal=row.withdrawal,withdrawal_delivered=withdrawal_delivery,closing_inventory=inventory,closing_inventory_book=book,withdrawal_cogs=withdrawal_cogs,cash_operating_cost=cash_cost,accounting_operating_cost=cogs+ft_cost+commodity+brokerage+storage_cost+opex,ft_unused_month=max(0,row.ft_capacity_day*days-purchases),ft_shortfall_month=max(0,purchases-row.ft_capacity_day*days)))
     result=pd.DataFrame(records).set_index('month')
+    terminal_mode=config.get('terminal_mode','Sell at final forward price')
+    if terminal_mode not in ['Sell at final forward price','Require zero inventory','Storage transfer']:raise ValueError('Unknown storage end-of-contract treatment.')
     terminal_price=float(result.supply_price.iloc[-1])
     if config.get('terminal_mode','Sell at final forward price')=='Require zero inventory' and inventory>1e-7:raise ValueError('The term ends with storage inventory. Choose terminal sale or enter withdrawals that empty storage.')
     terminal_sale=inventory*terminal_price if config.get('terminal_mode','Sell at final forward price')=='Sell at final forward price' else 0.
     terminal_gain=terminal_sale-book
     ft_credit=float(result.ft_cost.nlargest(2).mean())
     supply_credit=float(result.purchases.max()*max(0,result.supply_price.max()))
-    return result,dict(opening_inventory_cost=opening*opening_unit,terminal_storage_proceeds=terminal_sale,terminal_storage_gain=terminal_gain,ft_credit=ft_credit,supply_credit=supply_credit,ending_inventory=inventory,ending_inventory_book=book)
+    return result,dict(opening_inventory_cost=opening*opening_unit,terminal_storage_proceeds=terminal_sale,terminal_storage_gain=terminal_gain,ft_credit=ft_credit,supply_credit=supply_credit,ending_inventory=inventory,ending_inventory_book=book,terminal_mode=terminal_mode,transferred_inventory=inventory if terminal_mode=='Storage transfer' else 0.,transferred_inventory_book=book if terminal_mode=='Storage transfer' else 0.)
 
 def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, capital_hurdle=.08, financing_days=30, manual_credit=None, return_credit=True, quote=None):
     if margin is None or not np.isfinite(margin):raise ValueError('Enter the target margin.')
@@ -161,7 +163,7 @@ def evaluate_utility(schedules, prices, configs, overhead, margin, discount=.1, 
     if abs(profit-accounting_profit)>max(1e-5,abs(profit)*1e-9):raise ValueError('Inventory cash and profit reconciliation failed.')
     n=len(m)
     term_irr=(1+irr)**(n/12)-1 if irr is not None else None
-    summary=dict(term_irr=term_irr,term=n,target_price=target,offer_price=fixed,operating_break_even=operating_floor,npv_zero_price=npv_floor,contract_volume=volume,annual_revenue=float(m.revenue.sum()*12/n),contract_revenue=float(m.revenue.sum()),contract_profit=profit,annual_profit=profit*12/n,spread=profit/volume,gross_margin=profit/m.revenue.sum() if m.revenue.sum()>0 else None,npv=npv,irr=irr,irr_status=status,credit=credit,auto_credit=auto_credit,opening_inventory_cash=initial_inventory,total_initial_cash=initial_outflow,credit_recovery=credit_recovery,terminal_storage_proceeds=terminal_storage,overhead=float(m.overhead.sum()),shortfall_volume=float(m.ft_shortfall_month.sum()),discount=discount)
+    summary=dict(storage_transferred_volume=sum(x['transferred_inventory'] for x in meta.values()),storage_transferred_book=sum(x['transferred_inventory_book'] for x in meta.values()),term_irr=term_irr,term=n,target_price=target,offer_price=fixed,operating_break_even=operating_floor,npv_zero_price=npv_floor,contract_volume=volume,annual_revenue=float(m.revenue.sum()*12/n),contract_revenue=float(m.revenue.sum()),contract_profit=profit,annual_profit=profit*12/n,spread=profit/volume,gross_margin=profit/m.revenue.sum() if m.revenue.sum()>0 else None,npv=npv,irr=irr,irr_status=status,credit=credit,auto_credit=auto_credit,opening_inventory_cash=initial_inventory,total_initial_cash=initial_outflow,credit_recovery=credit_recovery,terminal_storage_proceeds=terminal_storage,overhead=float(m.overhead.sum()),shortfall_volume=float(m.ft_shortfall_month.sum()),discount=discount)
     audit=pd.DataFrame({'month_number':range(n+1),'net_cashflow':cash})
     audit['discount_factor']=1/(1+discount)**(audit.month_number/12)
     audit['present_value']=audit.net_cashflow*audit.discount_factor
@@ -246,6 +248,9 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta):
         t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#edf4f1')),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#bdcec8')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));return t
     story=[Image(BytesIO(get_logo_bytes()),width=280,height=280*402/2096),Spacer(1,10),Paragraph('OHIO UTILITY ECONOMICS',styles['Heading2']),p(utility),p(f'Start {start} | Detailed term {q["term"]} months | Settlements {asof}'),Spacer(1,12)]
     rows=[['Selected-term metric','Value','Selected-term metric','Value'],['All-in price',f'${q["offer_price"]:.4f}/MMBtu','Annualized revenue',money(q['annual_revenue'])],['Operating break-even',f'${q["operating_break_even"]:.4f}/MMBtu','NPV-zero price',f'${q["npv_zero_price"]:.4f}/MMBtu'],['Contract volume',f'{q["contract_volume"]:,.0f} MMBtu','Contract overhead',money(q['overhead'])],['Profit after overhead',money(q['contract_profit']),'Annualized profit',money(q['annual_profit'])],[f'NPV @ {q["discount"]:.2%}',money(q['npv']),'Term IRR',f'{q["term_irr"]:.2%}' if q['term_irr'] is not None else 'N/A'],['Upfront credit',money(q['credit']),'Opening storage cash',money(q['opening_inventory_cash'])],['Terminal credit recovery',money(q['credit_recovery']),'Terminal storage sale',money(q['terminal_storage_proceeds'])]]
+    for route,config in configs.items():
+        story.append(p(route+' storage at term end: '+config.get('terminal_mode','Sell at final forward price')))
+    if q.get('storage_transferred_volume',0)>0:story.append(p(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu; book cost {money(q['storage_transferred_book'])}. No terminal transfer proceeds or inventory credit; funded gas remains a contract cost."))
     campaign=next((c.get('campaign') for c in configs.values() if c.get('campaign')),None)
     if campaign:story.extend([p(f"Campaign: {campaign['customers']:,.0f} customers | Residential {campaign['residential_share']:.0%} | DEO East share {campaign['east_share']:.0%} | OPEX ${campaign['opex_hurdle']:.4f}/sold MMBtu"),p('Weather: '+campaign['normal_baseline']+'; daily profiles, no weekday multipliers. Columbia storage uses the East design-day proxy.')])
     story.extend([table(rows,[140,124,140,124]),Spacer(1,10),Paragraph('Standard contract terms',styles['Heading3'])])
@@ -311,7 +316,7 @@ st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2
 a,b,c=st.columns([1,3,1])
 with b:st.image(get_logo_bytes(),width=520)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-04 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-05 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -470,8 +475,8 @@ for r_index,route in enumerate(routes):
         else:opening_cost=first_supply if first_supply is not None else 0.
         x,y=st.columns(2)
         storage_capacity=x.number_input('Storage capacity (MMBtu; blank if unspecified)',min_value=0.,value=None,step=100.,key=key+'_storage_capacity')
-        terminal=y.selectbox('Storage at each term end',['Sell at final forward price','Require zero inventory'],key=key+'_terminal')
-        st.caption('Terminal sale is a modeling assumption, not a guaranteed sale. It liquidates remaining storage at that path’s last forward price, producing cash at the end of each evaluated term. Require zero inventory instead blocks terms that end with gas in storage.')
+        terminal=y.selectbox('Storage at each term end',['Sell at final forward price','Require zero inventory','Storage transfer'],key=key+'_terminal')
+        st.caption('Terminal sale is a modeling assumption, not a guaranteed sale. It liquidates remaining storage at that path’s last forward price, producing cash at the end of each evaluated term. Require zero inventory blocks terms that end with gas in storage. Storage transfer retains the ending physical inventory for transfer: no sale proceeds, transfer payment or terminal cash entry. Gas funded by this contract remains in its net cost; no residual inventory credit is added to profit, NPV or IRR.')
         if campaign_active:
             opening=campaign_meta[route]['opening_inventory'];storage_capacity=campaign_meta[route]['storage_capacity']
             if opening>0 and storage_price_mode=='Start-month supply contract' and first_supply is None:st.error('Missing start-month supply settlement for opening storage.');st.stop()
@@ -596,6 +601,8 @@ for col,label,value in zip(cols,['Annualized revenue','Contract volume','Operati
 cols=st.columns(4)
 for col,label,value in zip(cols,['Contract profit after overhead','Gross margin','Total overhead','Total initial cash'],[f"${q['contract_profit']:,.0f}",f"{q['gross_margin']:.2%}" if q['gross_margin'] is not None else 'N/A',f"${q['overhead']:,.0f}",f"${q['total_initial_cash']:,.0f}"]):col.metric(label,value)
 st.caption('Term IRR compounds the monthly cash-flow IRR over '+str(selected_term)+' months. NPV uses an effective annual discount rate converted to monthly. '+q['irr_status']+'. Revenue and profit are annualized contract averages. Storage is liquidated only under the chosen close-out assumption. The operating break-even recovers initial inventory costs and subtracts terminal inventory proceeds; the NPV-zero price also compensates for upfront credit timing at your selected discount rate.')
+if q['storage_transferred_volume']>0:
+    st.info(f"Storage transfer: {q['storage_transferred_volume']:,.1f} MMBtu remains for transfer (book cost ${q['storage_transferred_book']:,.2f}). Terminal transfer cash is $0. The contract retains the funded gas cost.")
 st.subheader('What goes into this offer price')
 volume=q['contract_volume']
 components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage gas',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum()))]

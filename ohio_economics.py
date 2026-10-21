@@ -324,13 +324,16 @@ st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2
 a,b,c=st.columns([1,3,1])
 with b:st.image(get_logo_bytes(),width=520)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-06 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-08 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
     try:return str(st.secrets.get(key,os.getenv(key,default)))
     except Exception:return os.getenv(key,default)
 repo,token,branch=cfg('WORKSTREAM_REPO'),cfg('WORKSTREAM_GITHUB_TOKEN'),cfg('WORKSTREAM_BRANCH','main')
+def persistent_ohio_widget(key):
+    return key.startswith('oh_') and not key.endswith(('_repeat_sales','_campaign_csv','_bridge_download'))
+
 if '_oh_pending' in st.session_state:
     snap=st.session_state.pop('_oh_pending')
     for k in list(st.session_state):
@@ -340,7 +343,7 @@ if '_oh_pending' in st.session_state:
     st.session_state['oh_utility']=snap['utility']
     if snap.get('trade_date'):st.session_state['oh_asof']=pd.Timestamp(snap['trade_date'])
     for k,v in snap.get('widgets',{}).items():
-        if not k.startswith('oh_') or k.endswith('_repeat_sales'):continue
+        if not persistent_ohio_widget(k):continue
         if k=='oh_start':v=pd.Timestamp(v).date()
         if '_component_' in k:v=tuple(v)
         st.session_state[k]=v
@@ -349,26 +352,29 @@ def open_saved(path):
     try:
         snap,sha=load_workstream(repo,token,path,branch)
         if snap.get('app_type')!='ohio':raise ValueError('Choose an Ohio workstream.')
-        st.session_state['_oh_pending']=snap;st.session_state['_oh_path']=path;st.session_state['_oh_sha']=sha
+        st.session_state['_oh_pending']=snap;st.session_state['_oh_path']=path;st.session_state['_oh_sha']=sha;st.session_state['_oh_msg']='Opened '+snap.get('name','Ohio workflow')+' | Saved '+snap.get('saved_at','date unavailable')
     except Exception as e:st.session_state['_oh_msg']=str(e)
 def save_saved(as_new=False):
     try:
         snap=st.session_state['_oh_snapshot']
         path,sha,payload=save_workstream(repo,token,'Ohio - '+st.session_state.get('oh_name','Working deal'),snap,branch,None if as_new else st.session_state.get('_oh_path'),None if as_new else st.session_state.get('_oh_sha'))
-        st.session_state['_oh_path']=path;st.session_state['_oh_sha']=sha;st.session_state['_oh_msg']='Saved '+payload['name']+' at '+payload['saved_at']
+        st.session_state['_oh_path']=path;st.session_state['_oh_sha']=sha;st.session_state['_oh_saved_at']=payload['saved_at'];st.session_state['_oh_msg']='Saved '+payload['name']+' at '+payload['saved_at']
     except Exception as e:st.session_state['_oh_msg']=str(e)
-with st.expander('Saved Ohio workstreams and setup',expanded=False):
+with st.expander('Save or reopen an Ohio campaign',expanded=True):
     st.text_input('Working deal name',key='oh_name')
     if repo and token:
-        if st.checkbox('Show saved Ohio deals'):
+        if st.checkbox('Show previously saved Ohio workflows',value=True):
             try:
                 saved=[x for x in list_workstreams(repo,token,branch) if x['name'].startswith('ohio-')]
                 if saved:
                     pick=st.selectbox('Saved Ohio deal',saved,format_func=lambda x:x['name'])
-                    st.button('Open Ohio deal',on_click=open_saved,args=(pick['path'],))
+                    st.button('Open selected workflow',on_click=open_saved,args=(pick['path'],))
+                else:st.info('No saved Ohio workflows yet. Enter a campaign name and save your current workstream below.')
             except Exception as e:st.error(str(e))
         x,y=st.columns(2);x.button('Save Ohio workstream',on_click=save_saved,disabled='_oh_snapshot' not in st.session_state);y.button('Save as new Ohio workstream',on_click=save_saved,args=(True,),disabled='_oh_snapshot' not in st.session_state)
     else:st.caption('Private cloud saving uses WORKSTREAM_REPO, WORKSTREAM_GITHUB_TOKEN and WORKSTREAM_BRANCH in Streamlit Secrets. JSON backups below work without setup.')
+    if st.session_state.get('_oh_path'):st.caption('Current saved workflow: '+st.session_state['_oh_path'].split('/')[-1])
+    st.caption('Save updates the opened workflow; Save as new creates a separate campaign. Each GitHub save also retains version history. Saved inputs include campaign mix, pricing-file selection, assumptions, monthly schedules, storage treatment and manual offer prices.')
     if '_oh_msg' in st.session_state:st.info(st.session_state['_oh_msg'])
     backup=st.file_uploader('Restore Ohio settings backup (not pricing)',type=['json'])
     if backup and st.button('Open Ohio backup'):
@@ -385,7 +391,7 @@ if st.session_state.pop('_oh_switched',False):
     other=st.session_state.get('_oh_cases',{}).get(utility,{})
     st.session_state['_oh_restore']=other
     for k,v in other.get('widgets',{}).items():
-        if k in ['oh_utility','oh_pricing_file','oh_name','oh_start','oh_term'] or k.endswith('_repeat_sales'):continue
+        if k in ['oh_utility','oh_pricing_file','oh_name','oh_start','oh_term'] or not persistent_ohio_widget(k):continue
         if '_component_' in k:v=tuple(v)
         if k not in st.session_state:st.session_state[k]=v
 
@@ -435,7 +441,7 @@ if campaign_active:
     with st.expander('Campaign load, normal weather and storage audit'):
         for route,profile in campaign_profiles.items():
             st.write(route);st.dataframe(profile,hide_index=True)
-            st.download_button('Download '+route+' campaign CSV',profile.to_csv(index=False),file_name='campaign_'+route.split(' ')[0]+'.csv',key=f'oh_{uid}_{route}_campaign_csv')
+            st.download_button('Download '+route+' campaign CSV',profile.to_csv(index=False),file_name='campaign_'+route.split(' ')[0]+'.csv',key=f'oh_download_{uid}_{route}_campaign_csv')
 manual_customer_count=None
 if not campaign_active:manual_customer_count=st.number_input('Utility customer count for per-customer economics',min_value=1,value=500,step=50,key=f'oh_{uid}_manual_customers')
 summary_box=st.container()
@@ -542,7 +548,7 @@ confirmed=st.checkbox('I have reviewed the sales, FT commitments, storage schedu
 # Input snapshot is captured before calculations, including incomplete drafts.
 widgets={}
 for k,v in st.session_state.items():
-    if (k.startswith(f'oh_{uid}_') or k in ['oh_utility','oh_start','oh_term','oh_name','oh_pricing_file']) and not k.endswith('_repeat_sales'):
+    if (k.startswith(f'oh_{uid}_') or k in ['oh_utility','oh_start','oh_term','oh_name','oh_pricing_file']) and persistent_ohio_widget(k):
         if hasattr(v,'isoformat'):v=v.isoformat()
         elif isinstance(v,tuple):v=list(v)
         widgets[k]=v
@@ -628,7 +634,7 @@ components.extend([('Total modeled cost / break-even',cost),('Profit at selected
 bridge=pd.DataFrame([{'Price component':label,'Contract dollars':v,'$/sold MMBtu':v/volume} for label,v in components])
 st.dataframe(bridge.style.format({'Contract dollars':'${:,.2f}','$/sold MMBtu':'${:,.4f}'}),hide_index=True,use_container_width=True)
 st.caption(f"Cost ${cost/volume:.4f} + selected-price profit ${q['spread']:.4f} = offer ${q['offer_price']:.4f}/MMBtu. Target margin is ${margin:.4f}. Collateral is funding, not an operating cost; its timing is included in NPV and IRR.")
-st.download_button('Download offer price breakdown',bridge.to_csv(index=False),file_name='Ohio_Offer_Price_Breakdown.csv',key=f'oh_{uid}_bridge_download')
+st.download_button('Download offer price breakdown',bridge.to_csv(index=False),file_name='Ohio_Offer_Price_Breakdown.csv',key=f'oh_download_{uid}_bridge_download')
 st.line_chart(m[['revenue','cash_cost','accounting_profit']])
 st.dataframe(m.style.format({c:('${:,.2f}' if any(v in c for v in ['cost','profit','revenue','price','cashflow','overhead']) else '{:,.0f}') for c in m.select_dtypes('number')},na_rep='N/A'),use_container_width=True)
 for route in routes:
@@ -647,7 +653,10 @@ try:
 except ImportError:st.info('Add reportlab to requirements.txt to enable PDF export.')
 # Capture term price controls created later in this run as part of the saved workstream.
 for k,v in st.session_state.items():
-    if k.startswith(f'oh_{uid}_mode_') or k.startswith(f'oh_{uid}_offer_'):snapshot['widgets'][k]=v
+    if k.startswith(f'oh_{uid}_') and persistent_ohio_widget(k):
+        if hasattr(v,'isoformat'):v=v.isoformat()
+        elif isinstance(v,tuple):v=list(v)
+        snapshot['widgets'][k]=v
 st.session_state['_oh_snapshot']=snapshot
 
 with backup_panel:st.download_button('Download Ohio workstream settings',json.dumps(snapshot,indent=2).encode(),'Ohio_Workstream.json','application/json')

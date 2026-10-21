@@ -440,7 +440,7 @@ def strict_fee(value):
     if re.fullmatch(r'(?:\$\s*)?0(?:\.0+)?(?:\s+details)?',text) or text in ['no fee','none','no']:return 0.
     return None
 
-def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=True):
+def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=False):
     def key(v):return re.sub('[^a-z0-9]','',str(v).lower())
     lookup={key(c):c for c in frame.columns}
     def col(*names):
@@ -464,7 +464,7 @@ def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=True):
     result['rank']=result.groupby('term').cumcount()+1
     return result[result['rank']<=3].drop(columns='supplier_key').reset_index(drop=True)
 
-def fetch_competitors(utility,customer_class,exclude_own=True):
+def fetch_competitors(utility,customer_class,exclude_own=False):
     territory=8 if utility.startswith('Columbia') else 1
     rate_code=1 if customer_class=='Residential' else 2
     url=f'https://energychoice.ohio.gov/ApplesToApplesComparision.aspx?Category=NaturalGas&TerritoryId={territory}&RateCode={rate_code}'
@@ -492,7 +492,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-17 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-18 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -800,7 +800,8 @@ competition_report=[]
 with st.container(border=True):
     st.subheader('Top three competitor offers by term')
     show_market=st.checkbox('Show current PUCO competition',value=True,key=f'oh_{uid}_show_competition')
-    exclude_own=st.checkbox('Exclude Mercury / Riverbend supplier listings',value=True,key=f'oh_{uid}_exclude_own')
+    exclude_own=False
+    st.caption('Mercury is included in the same ranking as every other supplier and appears whenever it qualifies for the top three.')
     st.caption('All competition and offer prices are $/Mcf. Enbridge rates are unchanged; Columbia $/Ccf rates are multiplied by 10. No heat factor is applied to competitor prices. Rankings use fixed offers with explicit $0 termination and monthly fees, exact term matches, and one offer per supplier per term. Verify tax and billing inclusions when interpreting price gaps.')
     @st.cache_data(ttl=3600,show_spinner=False)
     def load_market(utility,customer_class,exclude_own):return fetch_competitors(utility,customer_class,exclude_own)

@@ -41,7 +41,7 @@ def curve(prices, asof, selections, months):
 import numpy as np
 import pandas as pd
 
-TERMS=[12,18,24,36,48]
+TERMS=[6,12,18,24,36,48]
 ROUTES={'Columbia Gas of Ohio':['TCO'],'Enbridge Gas Ohio (formerly Dominion Energy Ohio)':['East - Eastern Gas','West - TCO']}
 
 def monthly_returns(cash, discount):
@@ -311,7 +311,7 @@ st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2
 a,b,c=st.columns([1,3,1])
 with b:st.image(get_logo_bytes(),width=520)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-03 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-04 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -427,10 +427,10 @@ summary_box=st.container()
 st.subheader('Shared commercial inputs')
 a,b,c,d=st.columns(4)
 margin=a.number_input('Target margin after overhead ($/MMBtu)',value=.18,step=.01,format='%.4f',key=f'oh_{uid}_margin')
-overhead_seed=b.number_input('Allocated monthly overhead ($)',value=0.,min_value=0.,step=100.,key=f'oh_{uid}_overhead')
+overhead_seed=b.number_input('Additional overhead above OPEX hurdle ($/month)',value=0.,min_value=0.,step=100.,key=f'oh_{uid}_overhead')
 capital=c.number_input('Annual capital charge (%)',value=8.,min_value=0.,step=.5,key=f'oh_{uid}_capital')/100
 fin_days=d.number_input('Cash financing days',value=30.,min_value=0.,step=1.,key=f'oh_{uid}_days')
-st.caption('Monthly overhead is the amount allocated to this utility, not an unallocated company total. It is charged once to the utility, including when Enbridge has two supply paths. No workforce cost is assumed beyond your entry. The target margin is additional to overhead and the modeled capital charge.')
+st.caption('Campaign OPEX already includes the per-MMBtu overhead hurdle ($2.00 Columbia / $0.65 DEO). Additional overhead starts at $0 to avoid charging it twice. Brokerage, FT reservations and storage service fees have no established campaign defaults and remain explicit optional inputs. Fuel starts at the workbook’s 4% assumption (4.1% West), modeled as retention gross-up. Monthly overhead is the amount allocated to this utility, not an unallocated company total. It is charged once to the utility, including when Enbridge has two supply paths. No workforce cost is assumed beyond your entry. The target margin is additional to overhead and the modeled capital charge.')
 a,b,c,d=st.columns(4)
 discount=a.number_input('NPV annual discount rate (%)',value=10.,min_value=0.,step=.5,key=f'oh_{uid}_discount')/100
 credit_mode=b.selectbox('Upfront credit',['Automatic','Manual'],key=f'oh_{uid}_credit_mode')
@@ -461,17 +461,21 @@ for r_index,route in enumerate(routes):
         commodity=y.number_input('Transportation ($/purchased MMBtu; all campaign months)',min_value=0.,value=(.30 if utility=='Columbia Gas of Ohio' else (.285 if 'East' in route else .35)),step=.01,key=key+'_commodity')
         broker=z.number_input('Brokerage ($/sold MMBtu)',min_value=0.,value=0.,step=.01,key=key+'_broker')
         x,y,z=st.columns(3)
-        fuel=x.number_input('Upstream fuel retention (%)',min_value=0.,max_value=99.,value=0.,step=.1,key=key+'_fuel')
+        fuel=x.number_input('Upstream fuel retention (%)',min_value=0.,max_value=99.,value=(4.1 if 'West' in route else 4.),step=.1,key=key+'_fuel')
         opening=y.number_input('Opening storage inventory (MMBtu)',min_value=0.,value=0.,step=100.,key=key+'_opening')
-        opening_cost=z.number_input('Opening inventory unit cost ($/MMBtu)',min_value=0.,value=0.,step=.01,key=key+'_opening_cost')
+        storage_price_mode=z.selectbox('Opening storage valuation',['Start-month supply contract','Manual price'],key=key+'_storage_price_mode')
+        first_supply=float(route_prices[route].iloc[0]) if pd.notna(route_prices[route].iloc[0]) else None
+        if storage_price_mode=='Manual price':
+            opening_cost=st.number_input('Opening storage price ($/MMBtu)',min_value=0.,value=float(first_supply or 0.),step=.01,format='%.4f',key=key+'_opening_cost')
+        else:opening_cost=first_supply if first_supply is not None else 0.
         x,y=st.columns(2)
         storage_capacity=x.number_input('Storage capacity (MMBtu; blank if unspecified)',min_value=0.,value=None,step=100.,key=key+'_storage_capacity')
         terminal=y.selectbox('Storage at each term end',['Sell at final forward price','Require zero inventory'],key=key+'_terminal')
         st.caption('Terminal sale is a modeling assumption, not a guaranteed sale. It liquidates remaining storage at that path’s last forward price, producing cash at the end of each evaluated term. Require zero inventory instead blocks terms that end with gas in storage.')
         if campaign_active:
             opening=campaign_meta[route]['opening_inventory'];storage_capacity=campaign_meta[route]['storage_capacity']
-            opening_cost=float(route_prices[route].iloc[0]) if opening>0 and pd.notna(route_prices[route].iloc[0]) else 0.
-            st.caption(f'Campaign opening storage {opening:,.1f} MMBtu; capacity {storage_capacity:,.1f} MMBtu. Opening gas is funded at the first delivery-month forward price (${opening_cost:.4f}/MMBtu). Opening inventory controls above apply only in manual mode.')
+            if opening>0 and storage_price_mode=='Start-month supply contract' and first_supply is None:st.error('Missing start-month supply settlement for opening storage.');st.stop()
+            st.caption(f'Campaign opening storage {opening:,.1f} MMBtu; capacity {storage_capacity:,.1f} MMBtu. Opening gas valuation uses the selected storage price (${opening_cost:.4f}/MMBtu). Opening inventory controls above apply only in manual mode.')
         default=pd.DataFrame({'month':months,'sales':0.,'ft_capacity_day':0.,'ft_rate':0.,'commodity_rate':commodity,'broker_rate':broker,'fuel_pct':fuel,'injection':0.,'withdrawal':0.,'storage_fixed':0.,'injection_fee':0.,'withdrawal_fee':0.,'injection_loss_pct':0.,'withdrawal_loss_pct':0.})
         route_restore=st.session_state.get('_oh_inputs',{}).get(uid,{}).get(route)
         if route_restore is None:route_restore=restore.get('schedules',{}).get(route)
@@ -518,7 +522,7 @@ with st.expander('How storage affects profit and investment returns'):
     st.write('Opening gas is an initial cash investment at its entered unit cost. Injections purchase additional gas at that month’s forward supply price and upstream fuel gross-up. Storage fuel reduces inventory credited. Withdrawals reduce inventory and offset customer purchases; withdrawal losses reduce delivered gas. The book value of withdrawn gas becomes supply cost using a moving weighted-average cost.')
     st.write('Monthly storage fees, injection fees and withdrawal fees are cash expenses. Injections occur before withdrawals within a month. The capacity check uses inventory immediately after injection and checks availability before withdrawals. Terminal inventory is either sold at the last monthly forward price or must be zero, according to your selection. NPV and IRR use cash flows, not just book profit, and add credit repayment only in the last month of each term.')
     st.write('The FT coverage check compares average monthly upstream purchases with daily FT capacity × calendar days. It does not test peak-day requirements, daily pipeline limits, injection/withdrawal ratchets, utility balancing rules or tariff constraints. Any uncovered volume is reported without assuming free alternate capacity.')
-confirmed=st.checkbox('I have reviewed the sales, FT commitments, storage schedule and overhead; any zero costs shown are intentional.',key=f'oh_{uid}_confirmed')
+confirmed=st.checkbox('I have reviewed the sales, FT commitments, storage schedule and overhead; any zero costs shown are intentional.',value=True,key=f'oh_{uid}_confirmed')
 
 # Input snapshot is captured before calculations, including incomplete drafts.
 widgets={}
@@ -531,23 +535,32 @@ snapshot=dict(app_type='ohio',schema_version=1,name=st.session_state.get('oh_nam
 st.session_state['_oh_snapshot']=snapshot
 backup_panel=st.container()
 if margin is None or overhead_seed is None or not confirmed:
-    with summary_box:st.info('Enter target margin and monthly overhead, populate the monthly volumes/capacity/storage schedules, then confirm the inputs to calculate offers. No Ohio-specific rates or volumes have been assumed.')
+    with summary_box:st.info('Enter target margin and monthly overhead, populate the monthly volumes/capacity/storage schedules, then confirm the inputs to calculate offers. Campaign defaults are populated; review any missing inputs.')
     with backup_panel:st.download_button('Download Ohio workstream settings',json.dumps(snapshot,indent=2).encode(),'Ohio_Workstream.json','application/json')
     st.stop()
 
 def run(n,offer=None):
     ms=months[:n]
     return evaluate_utility({r:s.iloc[:n] for r,s in schedules.items()},{r:x.reindex(ms) for r,x in route_prices.items()},configs,overhead_series.reindex(ms),margin,discount,capital,fin_days,manual_credit,return_credit,offer)
-results={};errors={}
+results={};errors={};model_results={}
 for n in TERMS:
-    try:results[n]=run(n)
+    try:
+        results[n]=run(n);model_results[n]=results[n]
     except ValueError as e:errors[n]=str(e)
 with summary_box:
     with st.container(border=True):
         st.subheader('Projected all-in utility offers')
         st.caption(utility+f' | {start:%b %Y} start | margin ${margin:.4f}/MMBtu after overhead and capital | NPV @ {discount:.2%}')
-        cols=st.columns(5)
-        for col,n in zip(cols,TERMS):
+        model_rows=[]
+        for n in TERMS:
+            if n in model_results:
+                target_q=model_results[n][0]
+                model_rows.append({'Term months':n,'Margin-based offer $/MMBtu':target_q['target_price'],'Target margin $/MMBtu':margin,'Annual profit $':target_q['annual_profit'],'Contract profit $':target_q['contract_profit'],'NPV $':target_q['npv'],'Term IRR':target_q['term_irr']})
+        st.dataframe(pd.DataFrame(model_rows).style.format({'Margin-based offer $/MMBtu':'${:,.4f}','Target margin $/MMBtu':'${:,.4f}','Annual profit $':'${:,.0f}','Contract profit $':'${:,.0f}','NPV $':'${:,.0f}','Term IRR':'{:.2%}'},na_rep='N/A'),hide_index=True,use_container_width=True)
+        st.markdown('**Test an offer price for each term**')
+        cols=st.columns(3)
+        for i,n in enumerate(TERMS):
+            col=cols[i%3]
             with col:
                 st.markdown(f'### {n} months')
                 if n not in results:st.caption('Unavailable: '+errors[n]);continue
@@ -557,6 +570,7 @@ with summary_box:
                 if mode=='Manual':offer=st.number_input('All-in $/MMBtu',value=float(target),step=.01,format='%.4f',key=f'oh_{uid}_offer_{n}')
                 elif mode!='Model target':offer=target-(.1 if mode=='Target less $0.10' else .2)
                 results[n]=run(n,offer);q=results[n][0]
+                st.caption(f"Margin-based target: ${target:,.4f}/MMBtu")
                 st.metric('All-in price',f"${q['offer_price']:,.4f}")
                 st.metric(f'NPV @ {discount:.1%}',f"${q['npv']:,.0f}")
                 st.metric('Term IRR',f"{q['term_irr']:.2%}" if q['irr'] is not None else 'N/A')
@@ -565,10 +579,16 @@ with summary_box:
                 st.caption(f"Credit ${q['credit']:,.0f}; opening gas ${q['opening_inventory_cash']:,.0f}. Credit returns in month {n} when enabled.")
                 if q['shortfall_volume']>0:st.warning(f"{q['shortfall_volume']:,.0f} MMBtu above entered FT envelope; review capacity.")
         st.caption('All terms use the exact 48-month schedules entered below, truncated to each term. Overhead, capacity and storage months are not automatically repeated or interpolated. Each term has its own initial credit and terminal storage close-out. All-in price includes every modeled charge; no utility delivery tariff or tax is added unless entered in costs.')
-if selected_term in results:detail=results[selected_term]
-else:
-    try:detail=run(selected_term)
-    except ValueError as e:st.error(f'{selected_term}-month detail unavailable: {e}');st.stop()
+st.subheader('Selected-term offer economics')
+try:
+    base_detail=run(selected_term)
+    a,b=st.columns(2)
+    detail_mode=a.selectbox('Detailed offer pricing',['Use term card / margin target','Manual offer price'],key=f'oh_{uid}_detail_mode')
+    if detail_mode=='Manual offer price':
+        detail_price=b.number_input('Customer all-in offer ($/MMBtu)',value=float(base_detail[0]['target_price']),step=.01,format='%.4f',key=f'oh_{uid}_detail_price_{selected_term}')
+        detail=run(selected_term,detail_price)
+    else:detail=results.get(selected_term,base_detail)
+except ValueError as e:st.error(f'{selected_term}-month detail unavailable: {e}');st.stop()
 q,m,paths,route_meta,audit=detail
 st.subheader(f'{selected_term}-month detailed economics')
 cols=st.columns(4)
@@ -576,6 +596,15 @@ for col,label,value in zip(cols,['Annualized revenue','Contract volume','Operati
 cols=st.columns(4)
 for col,label,value in zip(cols,['Contract profit after overhead','Gross margin','Total overhead','Total initial cash'],[f"${q['contract_profit']:,.0f}",f"{q['gross_margin']:.2%}" if q['gross_margin'] is not None else 'N/A',f"${q['overhead']:,.0f}",f"${q['total_initial_cash']:,.0f}"]):col.metric(label,value)
 st.caption('Term IRR compounds the monthly cash-flow IRR over '+str(selected_term)+' months. NPV uses an effective annual discount rate converted to monthly. '+q['irr_status']+'. Revenue and profit are annualized contract averages. Storage is liquidated only under the chosen close-out assumption. The operating break-even recovers initial inventory costs and subtracts terminal inventory proceeds; the NPV-zero price also compensates for upfront credit timing at your selected discount rate.')
+st.subheader('What goes into this offer price')
+volume=q['contract_volume']
+components=[('Gas purchases including fuel',float(m.purchase_cost.sum())),('Opening storage gas',q['opening_inventory_cash']),('Less terminal storage proceeds',-q['terminal_storage_proceeds']),('Transportation / delivery fees',float(m.commodity_cost.sum())),('FT reservation commitments',float(m.ft_cost.sum())),('Brokerage',float(m.brokerage_cost.sum())),('Storage service fees',float(m.storage_cost.sum())),('OPEX hurdle / base overhead',float(m.opex_cost.sum())),('Additional overhead',float(m.overhead.sum())),('Capital charge',float(m.capital_cost.sum()))]
+cost=sum(v for label,v in components)
+components.extend([('Total modeled cost / break-even',cost),('Profit at selected offer',q['contract_revenue']-cost),('Selected customer offer revenue',q['contract_revenue'])])
+bridge=pd.DataFrame([{'Price component':label,'Contract dollars':v,'$/sold MMBtu':v/volume} for label,v in components])
+st.dataframe(bridge.style.format({'Contract dollars':'${:,.2f}','$/sold MMBtu':'${:,.4f}'}),hide_index=True,use_container_width=True)
+st.caption(f"Cost ${cost/volume:.4f} + selected-price profit ${q['spread']:.4f} = offer ${q['offer_price']:.4f}/MMBtu. Target margin is ${margin:.4f}. Collateral is funding, not an operating cost; its timing is included in NPV and IRR.")
+st.download_button('Download offer price breakdown',bridge.to_csv(index=False),file_name='Ohio_Offer_Price_Breakdown.csv',key=f'oh_{uid}_bridge_download')
 st.line_chart(m[['revenue','cash_cost','accounting_profit']])
 st.dataframe(m.style.format({c:('${:,.2f}' if any(v in c for v in ['cost','profit','revenue','price','cashflow','overhead']) else '{:,.0f}') for c in m.select_dtypes('number')},na_rep='N/A'),use_container_width=True)
 for route in routes:

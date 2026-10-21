@@ -154,13 +154,14 @@ def build_summary_pdf(meta, summary, result, scenarios):
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.enums import TA_LEFT, TA_CENTER
     buffer=BytesIO()
     navy=colors.HexColor('#074F42');teal=colors.HexColor('#862131');pale=colors.HexColor('#F1F5F3')
     styles=getSampleStyleSheet()
     styles.add(ParagraphStyle(name='Brand',fontName='Helvetica-Bold',fontSize=17,leading=21,textColor=navy))
     styles.add(ParagraphStyle(name='SmallREM',fontName='Helvetica',fontSize=8,leading=11,textColor=navy))
     styles.add(ParagraphStyle(name='SectionREM',fontName='Helvetica-Bold',fontSize=10,leading=14,textColor=teal,spaceBefore=12,spaceAfter=7))
+    styles.add(ParagraphStyle(name='ProfitREM',fontName='Helvetica-Bold',fontSize=9,leading=12,textColor=navy,alignment=TA_CENTER))
     def para(text):return Paragraph(escape(str(text)),styles['SmallREM'])
     def usd(v):return f'${v:,.0f}'
     def pct(v):return f'{v:.2%}' if v is not None else 'N/A'
@@ -178,10 +179,13 @@ def build_summary_pdf(meta, summary, result, scenarios):
     for row in scenarios:
         npv=next(v for k,v in row.items() if k.startswith('NPV @'))
         rows.append([row['Scenario'],f"${row['Offer $/MMBtu']:.4f}",f"${row['Spread $/MMBtu']:.4f}",usd(row['Annualized GP $']),usd(row['Contract GP $']),usd(npv)])
-    def styled_table(rows,widths):
-        t=Table([[para(v) for v in row] for row in rows],colWidths=widths,hAlign='LEFT')
-        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,teal),('LINEBELOW',(0,1),(-1,-1),.3,colors.HexColor('#DBE5E9')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]));return t
-    story.append(styled_table(rows,[116,78,78,88,88,80]))
+    def styled_table(rows,widths,highlight_profit=False):
+        t=Table([[Paragraph(escape(str(v)).replace('\n','<br/>'),styles['ProfitREM']) if highlight_profit and col in (3,4) else para(v) for col,v in enumerate(row)] for row in rows],colWidths=widths,hAlign='LEFT')
+        t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,teal),('LINEBELOW',(0,1),(-1,-1),.3,colors.HexColor('#DBE5E9')),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
+        if highlight_profit:
+            t.setStyle(TableStyle([('BACKGROUND',(3,0),(4,-1),pale)]+[('BOX',(col,row),(col,row),1,teal) for col in (3,4) for row in range(len(rows))]))
+        return t
+    story.append(styled_table(rows,[116,78,78,88,88,80],highlight_profit=True))
     story.append(Paragraph('Pricing and credit assumptions',styles['SectionREM']))
     assumptions=[['Upstream transport',f"${meta['transport']:.4f}/MMBtu",'Brokerage',f"${meta['broker']:.4f}/MMBtu"],['Target spread',f"${meta['margin']:.4f}/MMBtu",'Supply fuel',pct(meta['fuel'])],['Capital hurdle',pct(meta['capital_hurdle']),'Financing period',f"{meta['days']:g} days"],['Capital charge',f"${result.capital_cost.sum()/summary['volume']:.4f}/MMBtu",'Discount rate',pct(meta['discount'])],['Upfront credit cash',usd(meta['investment']),'Terminal credit recovery',usd(meta['recovery'])]]
     if meta.get('credit_mode')=='Automatic':assumptions.append(['Automatic FT credit',usd(meta['ft_credit']),'Automatic supply credit',usd(meta['supply_credit'])])

@@ -300,7 +300,7 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
     def heading(v):return [Spacer(1,10),p(v,'HeadingOH')]
     def table(rows,widths,highlights=()):
         t=Table([[p(v) for v in row] for row in rows],colWidths=widths,repeatRows=1,hAlign='LEFT')
-        commands=[('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,wine),('LINEBELOW',(0,1),(-1,-1),.3,line),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),5),('BOTTOMPADDING',(0,0),(-1,-1),5)]
+        commands=[('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,wine),('LINEBELOW',(0,1),(-1,-1),.3,line),('VALIGN',(0,0),(-1,-1),'TOP'),('TOPPADDING',(0,0),(-1,-1),4),('BOTTOMPADDING',(0,0),(-1,-1),4)]
         for col in highlights:commands.extend([('BACKGROUND',(col,1),(col,-1),pale),('BOX',(col,0),(col,-1),.8,wine)])
         t.setStyle(TableStyle(commands));return t
     def header(subtitle):
@@ -314,15 +314,15 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
     actual=report.get('actual_results',{})
     story.extend(heading('Model-required versus actual offers'))
     rows=[['Term','Model price','Actual price','Model annual profit','Actual annual profit','Model annual profit / cust.','Actual annual profit / cust.']]
-    returns=[['Term','Model NPV','Actual NPV','Model term IRR','Actual term IRR']]
+    returns=[['Term','Model NPV','Actual NPV','Model contract profit / customer','Actual contract profit / customer']]
     for n in [6,12,18,24,36,48]:
         if n not in model:
             rows.append([f'{n} mo.','Unavailable','','','','','']);returns.append([f'{n} mo.','Unavailable','','','']);continue
         x=model[n][0];y=actual[n][0] if n in actual else None
         rows.append([f'{n} mo.',money(x['target_price'],4),money(y['offer_price'],4) if y else 'Not entered',money(x['annual_profit']),money(y['annual_profit']) if y else '-',money(x.get('annual_profit_per_customer'),2),money(y.get('annual_profit_per_customer'),2) if y else '-'])
-        returns.append([f'{n} mo.',money(x['npv']),money(y['npv']) if y else '-',percent(x['term_irr']),percent(y['term_irr']) if y else '-'])
+        returns.append([f'{n} mo.',money(x['npv']),money(y['npv']) if y else '-',money(x.get('contract_profit_per_customer'),2),money(y.get('contract_profit_per_customer'),2) if y else '-'])
     story.append(table(rows,[36,72,72,84,84,90,90],highlights=(2,4,6)))
-    story.extend(heading('Investment return comparison'))
+    story.extend(heading('Contract value and NPV comparison'))
     story.append(table(returns,[56,118,118,118,118]))
     story.extend([Spacer(1,7),p('Model offers achieve the selected target spread. Actual-offer economics use the entered customer prices with identical cost and load assumptions. Blank actual offers remain unquoted. Annual profit/customer uses the total utility campaign count once.')])
     story.extend(heading('Selected detailed offer - '+str(q['term'])+' months'))
@@ -348,7 +348,7 @@ def ohio_pdf(utility,start,asof,source,q,results,configs,route_meta,report=None)
             story.append(p(f"{route} {code}: {assumption['treatment']}; manual value {assumption.get('manual_value')}; {assumption['projected_months']} months in the 48-month curve use projected index assumptions."))
         story.append(p(f"{route}: {pricing} ($/MMBtu); no heat-content conversion. Storage close-out: {config['terminal_mode']}. Ending gas: {meta['ending_inventory']:,.1f} Mcf; terminal proceeds: {money(meta['terminal_storage_proceeds'])}."))
     if report.get('assumptions'):story.append(p(report['assumptions']))
-    story.extend([Spacer(1,7),p('Source: input/'+source),p('Weather: 2016-2025 weighted ERA5 coordinate-based daily normals; no weekday multipliers. Columbia storage uses the East design-day proxy. Opening storage is an upfront purchase, allocated over contract sales in the price table. Storage transfer retains funded gas cost without terminal proceeds or a residual credit.'),p('NPV uses the displayed effective annual discount rate converted to monthly. Term IRR compounds the monthly investment IRR over the selected term. Credit recovery and storage proceeds occur only at the actual term end. Capacity inputs require review; this is an indicative internal underwrite.')])
+    story.extend([Spacer(1,7),p('Source: input/'+source),p('Weather: 2016-2025 weighted ERA5 coordinate-based daily normals; no weekday multipliers. Columbia storage uses the East design-day proxy. Opening storage is an upfront purchase, allocated over contract sales in the price table. Storage transfer retains funded gas cost without terminal proceeds or a residual credit.'),p('NPV uses the displayed effective annual discount rate converted to monthly. Credit recovery and storage proceeds occur only at the actual term end. Capacity inputs require review; this is an indicative internal underwrite.')])
     for market in report.get('competition',[]):
         story.append(PageBreak())
         story.extend([p('Competitive offer comparison','TitleOH'),p(utility+' - '+market['customer_class'],'HeadingOH')])
@@ -492,7 +492,7 @@ ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-18 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-19 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):

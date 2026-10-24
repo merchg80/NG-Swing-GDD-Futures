@@ -356,6 +356,26 @@
       "part": "d958a24e00cc7f1060122872.parquet",
       "sha256": "7a017bf9130ef347beafcc185d91ad5394b33f8bff8ff4442d02b19430713e9d"
     },
+    "input/icecleared_2026_10_16.xlsx": {
+      "part": "c207ad502f8009e23ba99537.parquet",
+      "sha256": "25248764a8659025fea497f750c3803869e8050e9cc06eb75bee69da24e2555b"
+    },
+    "input/icecleared_2026_10_19.xlsx": {
+      "part": "c1e724db54c383da8904f79c.parquet",
+      "sha256": "6a5d990bb38229c04b3834d9f6dc4b681859d0bbef1fd0d86243c2c2ab199920"
+    },
+    "input/icecleared_2026_10_20.xlsx": {
+      "part": "4961282c46850df343330d3d.parquet",
+      "sha256": "622daa0b58f76618eb04991612ff75b2bf0283cc36984ebc2a39807e82daf5c9"
+    },
+    "input/icecleared_2026_10_21.xlsx": {
+      "part": "613b0b48a53396e821a0ca5c.parquet",
+      "sha256": "95d3385a885e0511bc39ec525f6c7ba72dbbb613b5e2d6f78bb37300a725cbfa"
+    },
+    "input/icecleared_2026_10_22.xlsx": {
+      "part": "0b957de812b5d081a626ae82.parquet",
+      "sha256": "d00f7b9186d18b6d319678bacac4d38ef3743537bfb566ae58bb9ee6f741bc2c"
+    },
     "input/icecleared_gas_08_31.xlsx": {
       "part": "003483a898292b12e6b4f8f7.parquet",
       "sha256": "20b7a827127c464c56bb665869e2e258e94cf6a3a7d4106458b2941c1dd866e4"

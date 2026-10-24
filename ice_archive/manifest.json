@@ -374,7 +374,11 @@
     },
     "input/icecleared_2026_10_22.xlsx": {
       "part": "0b957de812b5d081a626ae82.parquet",
-      "sha256": "d00f7b9186d18b6d319678bacac4d38ef3743537bfb566ae58bb9ee6f741bc2c"
+      "sha256": "937b0d9b44d2ff6ade31d5a9ba2b3725e99c68d0708a45ac1725090e2c6bd32c"
+    },
+    "input/icecleared_2026_10_23.xlsx": {
+      "part": "0afbfd4ff11cb78ddb738eec.parquet",
+      "sha256": "48b3a9d3ffd89eec14d10818a6520828de46ad454cf3115335ea4893c4a8a416"
     },
     "input/icecleared_gas_08_31.xlsx": {
       "part": "003483a898292b12e6b4f8f7.parquet",

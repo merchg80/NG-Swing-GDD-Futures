@@ -46,15 +46,17 @@ def curve(prices, asof, selections, months):
         out[f'component_{i+1}'] = x.set_index('strip').settlement_price.reindex(out.index)
     return out
 
-def calculate(pricing, usage, transport, broker, margin, fuel=0., fixed_quote=None, capital_hurdle=0.08, financing_days=30.):
+def calculate(pricing, usage, transport, broker, margin, fuel=0., fixed_quote=None, capital_hurdle=0.08, financing_days=30., pricing_mode='Fixed price', customer_adder=.38, supplier_premium=0., transport_pass_through=False):
     x=pricing.copy()
     components=[c for c in x if c.startswith('component_')]
     if x[components].isna().any().any(): raise ValueError('Missing settlement months; incomplete terms cannot be quoted.')
     x['usage_mmbtu']=np.asarray(usage,dtype=float)
     if not np.isfinite(x.usage_mmbtu).all() or (x.usage_mmbtu<0).any() or x.usage_mmbtu.sum()<=0: raise ValueError('Usage must be finite, nonnegative and total above zero.')
+    if not all(np.isfinite(v) for v in [transport,broker,margin,fuel,capital_hurdle,financing_days,customer_adder,supplier_premium]): raise ValueError('Deal assumptions must be finite.')
+    if fixed_quote is not None and not np.isfinite(fixed_quote): raise ValueError('Offer must be finite.')
     if not 0<=fuel<1: raise ValueError('Fuel must be between zero and 100%.')
     x['market_rate']=x[components].sum(axis=1)
-    x['supply_rate']=x.market_rate/(1-fuel)
+    x['supply_rate']=(x.market_rate+supplier_premium)/(1-fuel)
     x['transport_rate']=transport
     x['broker_rate']=broker
     x['landed_rate']=x.supply_rate+transport+broker
@@ -62,10 +64,16 @@ def calculate(pricing, usage, transport, broker, margin, fuel=0., fixed_quote=No
     x['capital_base_rate']=x.landed_rate.clip(lower=0.)
     x['capital_rate']=x.capital_base_rate*capital_hurdle*financing_days/365.
     x['all_in_cost_rate']=x.landed_rate+x.capital_rate
-    target=float(np.average(x.all_in_cost_rate,weights=x.usage_mmbtu)+margin)
-    quote=target if fixed_quote is None else float(fixed_quote)
-    x['customer_rate']=quote
-    x['revenue']=quote*x.usage_mmbtu
+    indexed=pricing_mode=='Index + adder'
+    passback=transport if transport_pass_through else 0.
+    x['transport_recovery_rate']=passback
+    residual=x.all_in_cost_rate-passback-(x.market_rate if indexed else 0.)
+    target=float(np.average(residual,weights=x.usage_mmbtu)+margin)
+    quote=(customer_adder if indexed else target) if fixed_quote is None else float(fixed_quote)
+    x['offer_rate']=quote
+    x['customer_rate']=(x.market_rate if indexed else 0.)+quote+passback
+    x['transport_recovery']=passback*x.usage_mmbtu
+    x['revenue']=x.customer_rate*x.usage_mmbtu
     for name,col in [('supply_cost','supply_rate'),('transport_cost','transport_rate'),('broker_cost','broker_rate')]: x[name]=x[col]*x.usage_mmbtu
     x['capital_cost']=x.capital_rate*x.usage_mmbtu
     x['gross_profit_before_capital']=x.revenue-x.supply_cost-x.transport_cost-x.broker_cost
@@ -117,10 +125,10 @@ def deal_summary(result, annual_discount=0.10, initial_investment=0., terminal_r
         else: status='No valid IRR'
     revenue=float(result.revenue.sum());volume=float(result.usage_mmbtu.sum());gp=float(result.gross_profit.sum())
     return dict(annual_revenue=revenue*12/n, volume=volume, annual_volume=volume*12/n,
-                contract_price=float(result.customer_rate.iloc[0]),collateral_recovery_month=n if terminal_recovery>0 else None,npv=float(npv),irr=irr,irr_status=status,
+                contract_price=float(np.average(result.customer_rate,weights=result.usage_mmbtu)),collateral_recovery_month=n if terminal_recovery>0 else None,npv=float(npv),irr=irr,irr_status=status,
                 spread=gp/volume,gross_margin=gp/revenue if revenue>0 else None)
 
-def standard_offers(prices, asof, selections, start, usage, fallback_profile, transport, broker, margin, fuel, capital_hurdle, financing_days, discount=0.10, investment=0., recovery=0., overrides=None, automatic_credit=False, full_credit_recovery=True):
+def standard_offers(prices, asof, selections, start, usage, fallback_profile, transport, broker, margin, fuel, capital_hurdle, financing_days, discount=0.10, investment=0., recovery=0., overrides=None, automatic_credit=False, full_credit_recovery=True, **deal_options):
     """Exact entered months first, then repeat first-year calendar-month estimates."""
     schedule=usage.copy()
     schedule['month']=pd.to_datetime(schedule['month'])
@@ -138,12 +146,12 @@ def standard_offers(prices, asof, selections, start, usage, fallback_profile, tr
             rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,npv=None,irr=None,discount_rate=discount,collateral_recovery_month=None,irr_status="Unavailable",projected_usage_months=projected,status=f'Unavailable: {missing} months missing settlements'))
             continue
         try:
-            result,offer=calculate(pricing,volumes,transport,broker,margin,fuel,fixed_quote=(overrides or {}).get(n),capital_hurdle=capital_hurdle,financing_days=financing_days)
+            result,offer=calculate(pricing,volumes,transport,broker,margin,fuel,fixed_quote=(overrides or {}).get(n),capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
             credit=required_credit(result,transport)
             term_investment=credit['total_credit'] if automatic_credit else investment
             term_recovery=term_investment if full_credit_recovery and automatic_credit else recovery
             returns=deal_summary(result,discount,term_investment,term_recovery)
-            rows.append(dict(term_months=n,upfront_credit=term_investment,ft_credit=credit['ft_credit'],supply_credit=credit['supply_credit'],credit_recovery=term_recovery,target_price=offer,offer_price=float(result.customer_rate.iloc[0]),break_even=offer-margin,spread=result.gross_profit.sum()/result.usage_mmbtu.sum(),gross_margin=returns['gross_margin'],annual_revenue=returns['annual_revenue'],contract_volume=result.usage_mmbtu.sum(),contract_profit=result.gross_profit.sum(),npv=returns['npv'],irr=returns['irr'],discount_rate=discount,collateral_recovery_month=n if term_recovery>0 else None,irr_status=returns['irr_status'],projected_usage_months=projected,status='Available'))
+            rows.append(dict(term_months=n,upfront_credit=term_investment,ft_credit=credit['ft_credit'],supply_credit=credit['supply_credit'],credit_recovery=term_recovery,target_price=offer,offer_price=float(result.offer_rate.iloc[0]),projected_all_in_price=returns['contract_price'],break_even=offer-margin,spread=result.gross_profit.sum()/result.usage_mmbtu.sum(),gross_margin=returns['gross_margin'],annual_revenue=returns['annual_revenue'],contract_volume=result.usage_mmbtu.sum(),contract_profit=result.gross_profit.sum(),npv=returns['npv'],irr=returns['irr'],discount_rate=discount,collateral_recovery_month=n if term_recovery>0 else None,irr_status=returns['irr_status'],projected_usage_months=projected,status='Available'))
         except ValueError as e:
             rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,npv=None,irr=None,discount_rate=discount,collateral_recovery_month=None,irr_status="Unavailable",projected_usage_months=projected,status=str(e)))
     return pd.DataFrame(rows)
@@ -168,14 +176,14 @@ def build_summary_pdf(meta, summary, result, scenarios):
     logo=Image(BytesIO(get_logo_bytes()),width=300,height=300*402/2096)
     logo.hAlign='LEFT'
     story=[logo,Paragraph('DEAL ECONOMICS | INTERNAL REVIEW',styles['SectionREM']),para(meta['customer']),para(f"Broker: {meta.get('broker_name','Not specified')}   |   Offer due: {meta.get('due_date','Not specified')}"),para(f"Delivery start: {meta['start']}   |   Term: {meta['term']} months   |   Settlements: {meta['asof']}"),Spacer(1,14)]
-    metrics=[('Annualized revenue',usd(summary['annual_revenue'])),('Contract volume',f"{summary['volume']:,.0f} MMBtu"),('All-in contract price',f"${summary['contract_price']:.4f}/MMBtu"),(f"NPV @ {meta['discount']:.2%}",usd(summary['npv'])),('Break-even price',f"${meta['break_even']:.4f}/MMBtu"),('Annualized IRR',pct(summary['irr'])),('Spread after capital',f"${summary['spread']:.4f}/MMBtu"),('Margin after capital',pct(summary['gross_margin']))]
+    metrics=[('Annualized revenue',usd(summary['annual_revenue'])),('Contract volume',f"{summary['volume']:,.0f} MMBtu"),('Projected weighted all-in price',f"${summary['contract_price']:.4f}/MMBtu"),(f"NPV @ {meta['discount']:.2%}",usd(summary['npv'])),('Break-even adder' if meta.get('pricing_mode')=='Index + adder' else 'Break-even offer',f"${meta['break_even']:.4f}/MMBtu"),('Contract profit',usd(result.gross_profit.sum())),('Spread after capital',f"${summary['spread']:.4f}/MMBtu"),('Margin after capital',pct(summary['gross_margin']))]
     cards=[]
     for i in [0,4]:
         cards.append([Paragraph(f'<font size="8">{escape(label)}</font><br/><br/><b>{escape(value)}</b>',styles['SmallREM']) for label,value in metrics[i:i+4]])
     table=Table(cards,colWidths=[132]*4,rowHeights=[54,54])
     table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),pale),('VALIGN',(0,0),(-1,-1),'TOP'),('BOX',(0,0),(-1,-1),.4,colors.white),('INNERGRID',(0,0),(-1,-1),4,colors.white),('LEFTPADDING',(0,0),(-1,-1),10),('TOPPADDING',(0,0),(-1,-1),10)]));story.append(table)
     story.append(Paragraph('Offer comparison',styles['SectionREM']))
-    rows=[['Scenario','Price\n$/MMBtu','Spread\n$/MMBtu','Annualized\nprofit','Contract\nprofit','NPV']]
+    rows=[['Scenario',('Adder\n$/MMBtu' if meta.get('pricing_mode')=='Index + adder' else 'Offer\n$/MMBtu'),'Spread\n$/MMBtu','Annualized\nprofit','Contract\nprofit','NPV']]
     for row in scenarios:
         npv=next(v for k,v in row.items() if k.startswith('NPV @'))
         rows.append([row['Scenario'],f"${row['Offer $/MMBtu']:.4f}",f"${row['Spread $/MMBtu']:.4f}",usd(row['Annualized GP $']),usd(row['Contract GP $']),usd(npv)])
@@ -188,15 +196,17 @@ def build_summary_pdf(meta, summary, result, scenarios):
     story.append(styled_table(rows,[116,78,78,88,88,80],highlight_profit=True))
     story.append(Paragraph('Pricing and credit assumptions',styles['SectionREM']))
     assumptions=[['Upstream transport',f"${meta['transport']:.4f}/MMBtu",'Brokerage',f"${meta['broker']:.4f}/MMBtu"],['Target spread',f"${meta['margin']:.4f}/MMBtu",'Supply fuel',pct(meta['fuel'])],['Capital hurdle',pct(meta['capital_hurdle']),'Financing period',f"{meta['days']:g} days"],['Capital charge',f"${result.capital_cost.sum()/summary['volume']:.4f}/MMBtu",'Discount rate',pct(meta['discount'])],['Upfront credit cash',usd(meta['investment']),'Terminal credit recovery',usd(meta['recovery'])]]
+    assumptions.insert(0,['Pricing structure',meta.get('pricing_mode','Fixed price'),'Transport pass-through','Full cost' if meta.get('transport_pass_through') else 'None'])
+    if meta.get('pricing_mode')=='Index + adder': assumptions.insert(1,['Customer index adder',f"${meta['customer_offer_rate']:.4f}/MMBtu",'Supplier premium',f"${meta['supplier_premium']:.4f}/MMBtu"])
     if meta.get('credit_mode')=='Automatic':assumptions.append(['Automatic FT credit',usd(meta['ft_credit']),'Automatic supply credit',usd(meta['supply_credit'])])
     story.append(styled_table(assumptions,[132,132,132,132]))
     story.append(Paragraph('Source and valuation basis',styles['SectionREM']))
     story.append(para('Source: '+meta['source']))
     story.append(para('Market components: '+meta['components']))
     story.append(Spacer(1,6))
-    story.append(para('NPV is measured at contract start using the stated effective annual rate and month-end profit after the modeled capital charge. IRR is annualized on upfront credit cash and includes terminal credit recovery. These are cash-flow estimates, not a full working-capital forecast.'))
+    story.append(para('NPV is valued at contract start using the selected effective annual rate, month-end profit after capital charge, upfront credit and terminal recovery. Annualized figures equal contract totals x 12 / term months.'))
     story.append(Spacer(1,5))
-    story.append(para('Annualized revenue and profit equal contract totals multiplied by 12 / term months. The quoted all-in price includes transportation and brokerage; these are deducted once, not billed again. Break-even includes supply, transport, brokerage and capital charge; overhead and taxes are excluded. The offer reductions hold volumes and costs constant.'))
+    story.append(para('Indexed bills = signed market curve + adder + transport pass-through when enabled. Projected all-in price is volume-weighted. Transport recovery equals its expense; financing remains. Break-even shows the adder or fixed offer required after recovery. Overhead and taxes are excluded.'))
     def footer(c,doc):
         c.setStrokeColor(teal);c.line(42,39,570,39);c.setFont('Helvetica',7);c.setFillColor(navy);c.drawString(42,27,'CONFIDENTIAL | Riverbend Gas Marketing');c.drawRightString(570,27,f'Page {doc.page}')
     SimpleDocTemplate(buffer,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=36,bottomMargin=50,title='Riverbend Deal Economics',author='Riverbend Gas Marketing').build(story,onFirstPage=footer,onLaterPages=footer)
@@ -283,7 +293,7 @@ h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
 logo_left,logo_center,logo_right=st.columns([1,3,1])
 with logo_center:st.image(get_logo_bytes(),use_container_width=True)
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build RGM-FILE-SELECTION-FIX')
+st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-01')
 def workstream_config():
     def setting(name,default=''):
         try:return str(st.secrets.get(name,os.getenv(name,default)))
@@ -468,8 +478,22 @@ for i,c in enumerate(cols):
     if st.session_state.get(f'wk_component_{i}') not in options:
         if st.session_state.get(f'wk_component_{i}') is not None:st.warning(f'Saved component {i+1} is not in this pricing file. Review the replacement selection before quoting.')
         st.session_state.pop(f'wk_component_{i}',None)
-    selections.append(c.selectbox(f'Component {i+1}',options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'wk_component_{i}'))
+    selections.append(c.selectbox((['Henry Hub','Basis','Index adjustment (SHS)'][i] if kind=='Additive components' else 'Outright market curve'),options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'wk_component_{i}'))
 if len(set(selections))!=len(selections): st.error('Select distinct components.');st.stop()
+st.subheader('Customer pricing structure')
+def reset_offer_structure():
+    for key in list(st.session_state):
+        if key.startswith(('offer_mode_','offer_override_')) or key in ('wk_custom_override','wk_custom_price','wk_transport_pass_through'):
+            st.session_state.pop(key,None)
+pricing_mode=st.radio('Contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_pricing_mode',on_change=reset_offer_structure)
+is_indexed=pricing_mode=='Index + adder'
+customer_adder=st.number_input('Customer adder above monthly index ($/MMBtu)',value=.38,step=.01,format='%.4f',key='wk_customer_adder') if is_indexed else .38
+supplier_premium=st.number_input('Supplier premium / discount to the same index ($/MMBtu)',value=0.,step=.01,format='%.4f',key='wk_supplier_premium')
+transport_pass_through=st.checkbox('Transportation is passed through in full to the customer',value=is_indexed,key='wk_transport_pass_through')
+deal_options=dict(pricing_mode=pricing_mode,customer_adder=customer_adder,supplier_premium=supplier_premium,transport_pass_through=transport_pass_through)
+quote_label='Index adder ($/MMBtu)' if is_indexed else 'Offer excluding transport pass-through ($/MMBtu)' if transport_pass_through else 'All-in offer ($/MMBtu)'
+break_even_label='Break-even adder ($/MMBtu)' if is_indexed else 'Break-even offer ($/MMBtu)'
+st.caption('Monthly index = Henry Hub + signed basis + signed index adjustment. Negative components remain negative. Index + adder bills that monthly index plus the customer adder. Transportation pass-through is billed separately at its cost; financing that expense still incurs the capital charge.')
 st.subheader('Deal assumptions')
 a,b,c,d=st.columns(4)
 transport=a.number_input('Upstream transport ($/delivered MMBtu)',min_value=0.,value=defaults['transport'],step=.01,format='%.4f',key='wk_transport')
@@ -506,7 +530,7 @@ with st.expander('Upfront credit and investment returns',expanded=True):
     automatic_credit=credit_mode=='Automatic'
     credit_pricing=curve(prices,asof,selections,months)
     try:
-        credit_result,_=calculate(credit_pricing,usage.usage_mmbtu,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days)
+        credit_result,_=calculate(credit_pricing,usage.usage_mmbtu,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
         credit_parts=required_credit(credit_result,transport)
     except ValueError as e:
         st.error('Unable to size credit for the selected term: '+str(e));st.stop()
@@ -518,7 +542,7 @@ with st.expander('Upfront credit and investment returns',expanded=True):
     c.caption(f'Credit cash recovered: ${recovery:,.2f} in month {term}')
     st.caption(f"Automatic FT credit: ${transport:.4f} x {credit_parts['top_two_average_volume']:,.0f} MMBtu (average of the two highest-use months) = ${credit_parts['ft_credit']:,.2f}. Supply credit: {credit_parts['highest_volume']:,.0f} MMBtu x ${credit_parts['highest_supply_price']:.4f} = ${credit_parts['supply_credit']:,.2f}. Total: ${auto_amount:,.2f}.")
     st.caption('Supply price is the selected monthly gas-supply curve, fuel-adjusted, before transportation, brokerage and marketer margin. The highest price and highest volume need not occur in the same month. One-month terms use that single month for the FT average. Negative peak supply prices are floored at zero for collateral sizing. Automatic sizing is calculated separately over each standard term; manual sizing uses your same input across all terms. Collateral is returned only at the end of that term when enabled.')
-offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
 with summary_panel:
     with st.container(border=True):
         st.subheader('Projected offers | standard contract terms')
@@ -535,18 +559,21 @@ with summary_panel:
                         st.warning(row.status)
                         output_panels.append(None)
                         continue
-                    st.caption(f'All-in target: ${row.offer_price:,.4f}/MMBtu')
-                    setting=st.selectbox('Offer setting',['Model target','Target less $0.10','Target less $0.20','Manual price'],key=f'offer_mode_{row.term_months}')
+                    st.caption(f'Model required {"adder" if is_indexed else "offer"}: ${row.target_price:,.4f}/MMBtu')
+                    setting=st.selectbox('Offer setting',(['Entered adder','Model target','Target less $0.10','Target less $0.20','Manual price'] if is_indexed else ['Model target','Target less $0.10','Target less $0.20','Manual price']),key=f'offer_mode_{row.term_months}')
                     if setting=='Manual price':
-                        overrides[row.term_months]=st.number_input('All-in offer ($/MMBtu)',value=float(row.offer_price),step=.01,format='%.4f',key=f'offer_override_{row.term_months}')
-                    elif setting!='Model target':
-                        overrides[row.term_months]=row.offer_price-(.1 if setting=='Target less $0.10' else .2)
+                        overrides[row.term_months]=st.number_input(quote_label,value=float(row.offer_price),step=.01,format='%.4f',key=f'offer_override_{row.term_months}')
+                    elif setting=='Model target':
+                        overrides[row.term_months]=row.target_price
+                    elif setting.startswith('Target less'):
+                        overrides[row.term_months]=row.target_price-(.1 if setting=='Target less $0.10' else .2)
                     output_panels.append(st.container())
-        offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,overrides,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+        offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,overrides,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
         for panel,row in zip(output_panels,offers.itertuples(index=False)):
             if panel is None: continue
             with panel:
-                st.metric('All-in offer ($/MMBtu)',f'${row.offer_price:,.4f}')
+                st.metric(quote_label,f'${row.offer_price:,.4f}')
+                if is_indexed: st.caption(f'Projected all-in: ${row.projected_all_in_price:.4f}/MMBtu')
                 st.metric(f'NPV @ {discount:.2%}',f'${row.npv:,.0f}' if pd.notna(row.npv) else 'N/A')
                 st.metric('Annualized IRR',f'{row.irr:.2%}' if pd.notna(row.irr) else 'N/A')
                 st.caption(f'Credit posted: ${row.upfront_credit:,.0f}')
@@ -554,9 +581,9 @@ with summary_panel:
                 st.metric('Contract profit',f'${row.contract_profit:,.0f}')
                 st.metric('Spread ($/MMBtu)',f'${row.spread:,.4f}')
                 st.metric('Gross margin',f'{row.gross_margin:.2%}' if pd.notna(row.gross_margin) else 'N/A')
-        st.caption('Change each term independently. Model target follows the shared assumptions; manual prices remain as entered. Offer reductions are relative to the current model target.')
+        st.caption('Entered adder uses the shared customer adder for all indexed terms. Model target calculates the adder needed for your target margin. Manual entries remain as entered; target reductions use the model required adder / offer.')
         st.caption(f'Credit sizing: {credit_mode}. Each card shows its own posted and recovered credit cash. Discount rate: {discount:.2%} effective annual. NPV is valued at contract start; IRR is annualized.')
-        st.caption('Each offer is a separately calculated fixed price including supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; any calendar months not entered use the displayed 1,700 MMBtu/month default. Each term reflects its own offer setting above. For the selected contract term, that price also feeds the detailed summary, comparisons and PDF.')
+        st.caption('Each offer follows the selected pricing structure. Indexed offers show the adder above the monthly index; projected revenue uses the forward index. Full transportation pass-through is added to the bill and deducted as an equal cost. Each model target includes supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; missing calendar months use the displayed default.')
         with st.expander('Standard offer detail and volume assumptions'):
             st.dataframe(format_table(offers),hide_index=True,use_container_width=True)
         st.download_button('Download standard offers CSV',offers.to_csv(index=False).encode(),'standard_contract_offers.csv','text/csv')
@@ -568,7 +595,7 @@ with summary_panel:
             quote=overrides.get(term)
         else:
             custom_override=st.checkbox(f'Manual offer for selected {term}-month contract',key='wk_custom_override')
-            quote=st.number_input('Selected contract offer ($/MMBtu)',value=4.,step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
+            quote=st.number_input(quote_label,value=(customer_adder if is_indexed else 4.),step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
 import json
 widget_snapshot={}
 for k,v in st.session_state.items():
@@ -577,7 +604,7 @@ for k,v in st.session_state.items():
         elif isinstance(v,tuple):v=list(v)
         widget_snapshot[k]=v
 current_usage=[dict(month=str(pd.Timestamp(row.month).date()),usage_mmbtu=float(row.usage_mmbtu)) for row in usage.itertuples(index=False)]
-snapshot=dict(credit_sizing_mode=credit_mode,calculated_credit=credit_parts,credit_posted=investment,schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=False,name=st.session_state.get('ws_name',''))
+snapshot=dict(pricing_structure=deal_options,credit_sizing_mode=credit_mode,calculated_credit=credit_parts,credit_posted=investment,schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=False,name=st.session_state.get('ws_name',''))
 st.session_state['_current_snapshot']=snapshot
 st.session_state.pop('_pricing_carry',None)
 with summary_panel:
@@ -587,7 +614,7 @@ try:
     if p.isna().any().any():
         st.error('Pricing is missing for these delivery months/components. Select another trade date, product or term.')
         st.dataframe(p[p.isna().any(axis=1)].style.format('${:,.4f}',na_rep='Missing'));st.stop()
-    result,target=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,quote,capital_hurdle,financing_days)
+    result,target=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,quote,capital_hurdle,financing_days,**deal_options)
 except ValueError as e: st.error(str(e));st.stop()
 summary=deal_summary(result,discount,investment,recovery)
 with summary_panel:
@@ -610,45 +637,49 @@ with summary_panel.container(border=True):
     top=st.columns(4)
     top[0].metric('Annual revenue (annualized)',f"${summary['annual_revenue']:,.0f}")
     top[1].metric('Volume sold (contract MMBtu)',f"{summary['volume']:,.0f}")
-    top[2].metric('All-in contract price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
+    top[2].metric('Projected weighted all-in price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
     top[3].metric(f'NPV @ {discount:.2%} annual',f"${summary['npv']:,.0f}")
     bottom_break_even=target-margin
     bottom=st.columns(4)
-    bottom[3].metric('Break-even ($/MMBtu)',f'${bottom_break_even:,.4f}')
+    bottom[3].metric(break_even_label,f'${bottom_break_even:,.4f}')
     bottom[0].metric('IRR (annualized)',f"{summary['irr']:.2%}" if summary['irr'] is not None else 'N/A')
     bottom[1].metric('MMBtu spread ($/MMBtu)',f"${summary['spread']:,.4f}")
     bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
     st.markdown('**All-in price breakdown ($/delivered MMBtu)**')
     weighted_supply=float(result.supply_cost.sum()/result.usage_mmbtu.sum())
     weighted_capital=float(result.capital_cost.sum()/result.usage_mmbtu.sum())
-    bridge=pd.DataFrame({'Component':['Gas supply (volume-weighted)','Transportation included','Brokerage included','Capital charge included','Marketer margin after capital','Total all-in customer price'],'Rate ($/MMBtu)':[weighted_supply,transport,broker,weighted_capital,summary['spread'],summary['contract_price']]})
+    bridge=pd.DataFrame({'Component':['Gas supply (volume-weighted)','Transportation pass-through' if transport_pass_through else 'Transportation included','Brokerage included','Capital charge included','Marketer margin after capital','Projected weighted all-in customer price'],'Rate ($/MMBtu)':[weighted_supply,transport,broker,weighted_capital,summary['spread'],summary['contract_price']]})
     st.dataframe(bridge.style.format({'Rate ($/MMBtu)':'${:,.4f}'}),hide_index=True,use_container_width=True)
-    st.caption('Transportation and brokerage are included inside the quoted all-in price. They are not added to the customer bill again. Customer revenue is the all-in price multiplied by usage; supply, transport, brokerage and the modeled capital charge are each deducted once.')
+    st.caption('The projected all-in customer rate includes any separate transportation pass-through once. Transportation recovery and expense are equal when enabled. Brokerage, supplier premium, fuel and the financing charge reduce the remaining spread. The financing base includes transportation even when reimbursed.')
+    if is_indexed:
+        st.metric('Customer monthly index adder',f'${result.offer_rate.iloc[0]:.4f}/MMBtu')
+        st.caption('Customer settlement: monthly Henry Hub + signed basis + signed SHS adjustment + customer adder + transportation pass-through when enabled. The projected all-in price is volume-weighted, not a fixed quote.')
     st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
     st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
     st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
-    st.download_button('Download deal summary CSV',pd.DataFrame([dict(customer=customer,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
+    st.download_button('Download deal summary CSV',pd.DataFrame([dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),customer=customer,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
 vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
 a,b,c,d=st.columns(4)
-a.metric('Target customer fixed price',f'${target:,.4f}/MMBtu')
+a.metric('Required index adder' if is_indexed else 'Required offer excluding pass-through',f'${target:,.4f}/MMBtu')
 b.metric('Total contract volume',f'{vol:,.0f} MMBtu')
 c.metric('Contract gross profit',f'${gp:,.0f}')
 d.metric('Realized gross margin',f'${gp/vol:,.4f}/MMBtu')
 st.caption(f'Customer: {customer} • Settlements: {pd.Timestamp(asof):%Y-%m-%d} • Annualized gross profit: ${gp*12/term:,.0f}')
 st.subheader('Offer comparison')
+if is_indexed: st.caption('Offer and break-even columns below are adders above the monthly index. Projected all-in prices include the signed market curve and any transportation pass-through.')
 st.caption('Offer uses the proposed customer price, or target price when no proposed price is entered. Costs and volume remain constant. Break-even includes the capital charge and excludes overhead and taxes.')
 scenario_rows=[]
 scenario_monthly=pd.DataFrame(index=result.index)
 for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20',.20)]:
-    offer_price=float(result.customer_rate.iloc[0])-reduction
-    sr,_=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,offer_price,capital_hurdle,financing_days)
+    offer_price=float(result.offer_rate.iloc[0])-reduction
+    sr,_=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,offer_price,capital_hurdle,financing_days,**deal_options)
     ss=deal_summary(sr,discount,investment,recovery)
-    scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
+    scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Pricing structure':pricing_mode,'Projected all-in $/MMBtu':ss['contract_price'],'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
     scenario_monthly[label]=sr.gross_profit
 scenario_table=pd.DataFrame(scenario_rows)
 with pdf_panel:
     try:
-        pdf_bytes=build_summary_pdf(dict(credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
+        pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
         st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
     except ImportError:
         st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
@@ -674,13 +705,13 @@ with t2:
     rows=[]
     for n in sorted(set([1,3,6,12,18,24,36,48,term])):
         if n>term or usage.usage_mmbtu.iloc[:n].sum()<=0: continue
-        r,q=calculate(p.iloc[:n],usage.usage_mmbtu.iloc[:n],transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days)
-        rows.append({'Months':n,'Volume MMBtu':r.usage_mmbtu.sum(),'Target fixed price':q,'Gross profit':r.gross_profit.sum(),'Annualized GP':r.gross_profit.sum()*12/n})
+        r,q=calculate(p.iloc[:n],usage.usage_mmbtu.iloc[:n],transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
+        rows.append({'Months':n,'Volume MMBtu':r.usage_mmbtu.sum(),'Required adder / offer':q,'Gross profit':r.gross_profit.sum(),'Annualized GP':r.gross_profit.sum()*12/n})
     st.dataframe(format_table(pd.DataFrame(rows)),hide_index=True)
 with t3:
-    st.write('Supply = sum of selected components ÷ (1 − fuel retention). Landed cost = supply + upstream transport + brokerage. Target fixed price = volume-weighted landed cost + target margin. Capital charge = max(landed cost, 0) × annual hurdle × financing days / 365. Target fixed price = weighted landed cost + weighted capital charge + target margin. Monthly modeled profit = (customer fixed price − landed cost − capital charge) × usage.')
+    st.write('Indexed customer rate = signed market curve + customer adder + transport pass-through. Supply = (signed market curve + supplier premium) / (1 - fuel). Profit = revenue - supply - transport - brokerage - capital charge. Required adder = volume-weighted (all-in cost - market curve - transportation recovery) + target margin.')
     st.write('Uses actual entered monthly volumes, calendar delivery months and a single settlement snapshot. No interpolation, silent zero filling or fallback to older settlements. Daily swing observations are not converted to forward prices.')
-    st.write('The capital charge is a modeled financing expense, not a full working-capital schedule. NPV separately discounts profit after that charge; initial investment and terminal recovery are additional cash flows and should not duplicate the financed operating costs. The workbook’s NPV/carry formulas and daily-volume approximation are not reproduced. This model quotes a level fixed price over the selected term. It excludes utility charges, imbalance exposure, credit/collateral financing and overhead unless included in your rates.')
+    st.write('The capital charge is a modeled financing expense, not a full working-capital schedule. NPV separately discounts profit after that charge; initial investment and terminal recovery are additional cash flows and should not duplicate the financed operating costs. The workbook’s NPV/carry formulas and daily-volume approximation are not reproduced. This model supports fixed offers and a level adder to the same monthly purchase and sale index. It excludes utility charges, imbalance exposure, credit/collateral financing and overhead unless included in your rates.')
     st.dataframe(pd.DataFrame(selections,columns=['Hub','Product','Contract']),hide_index=True)
 export=result.reset_index(); export.insert(0,'customer',customer);export.insert(1,'trade_date',pd.Timestamp(asof));export.insert(2,'contract_start_date',str(start_entered));export.insert(3,'term_months',term);export.insert(2,'components',' + '.join(x[2] for x in selections))
 st.download_button('Download monthly economics CSV',export.to_csv(index=False).encode(),'rem_deal_economics.csv','text/csv')

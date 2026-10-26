@@ -168,14 +168,14 @@ def build_summary_pdf(meta, summary, result, scenarios):
     styles=getSampleStyleSheet()
     styles.add(ParagraphStyle(name='Brand',fontName='Helvetica-Bold',fontSize=17,leading=21,textColor=navy))
     styles.add(ParagraphStyle(name='SmallREM',fontName='Helvetica',fontSize=8,leading=11,textColor=navy))
-    styles.add(ParagraphStyle(name='SectionREM',fontName='Helvetica-Bold',fontSize=10,leading=14,textColor=teal,spaceBefore=12,spaceAfter=7))
+    styles.add(ParagraphStyle(name='SectionREM',fontName='Helvetica-Bold',fontSize=10,leading=14,textColor=teal,spaceBefore=9,spaceAfter=6))
     styles.add(ParagraphStyle(name='ProfitREM',fontName='Helvetica-Bold',fontSize=9,leading=12,textColor=navy,alignment=TA_CENTER))
     def para(text):return Paragraph(escape(str(text)),styles['SmallREM'])
     def usd(v):return f'${v:,.0f}'
     def pct(v):return f'{v:.2%}' if v is not None else 'N/A'
     logo=Image(BytesIO(get_logo_bytes()),width=300,height=300*402/2096)
     logo.hAlign='LEFT'
-    story=[logo,Paragraph('DEAL ECONOMICS | INTERNAL REVIEW',styles['SectionREM']),para(meta['customer']),para(f"Broker: {meta.get('broker_name','Not specified')}   |   Offer due: {meta.get('due_date','Not specified')}"),para(f"Delivery start: {meta['start']}   |   Term: {meta['term']} months   |   Settlements: {meta['asof']}"),Spacer(1,14)]
+    story=[logo,Paragraph('DEAL ECONOMICS | INTERNAL REVIEW',styles['SectionREM']),para(meta['customer']),para(f"Utility: {meta.get('utility') or 'Not specified'}   |   Facility: {meta.get('facility_type') or 'Not specified'}"),para(f"Location: {meta.get('client_location') or 'Not specified'}"),para(f"Broker: {meta.get('broker_name','Not specified')}   |   Offer due: {meta.get('due_date','Not specified')}"),para(f"Delivery start: {meta['start']}   |   Term: {meta['term']} months   |   Settlements: {meta['asof']}"),Spacer(1,8)]
     metrics=[('Annualized revenue',usd(summary['annual_revenue'])),('Contract volume',f"{summary['volume']:,.0f} MMBtu"),('Projected weighted all-in price',f"${summary['contract_price']:.4f}/MMBtu"),(f"NPV @ {meta['discount']:.2%}",usd(summary['npv'])),('Break-even adder' if meta.get('pricing_mode')=='Index + adder' else 'Break-even offer',f"${meta['break_even']:.4f}/MMBtu"),('Contract profit',usd(result.gross_profit.sum())),('Spread after capital',f"${summary['spread']:.4f}/MMBtu"),('Margin after capital',pct(summary['gross_margin']))]
     cards=[]
     for i in [0,4]:
@@ -293,7 +293,7 @@ h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
 logo_left,logo_center,logo_right=st.columns([1,3,1])
 with logo_center:st.image(get_logo_bytes(),use_container_width=True)
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-01')
+st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-02')
 def workstream_config():
     def setting(name,default=''):
         try:return str(st.secrets.get(name,os.getenv(name,default)))
@@ -459,6 +459,9 @@ with st.expander('1. Select ICE pricing file and contract dates', expanded=True)
     asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'),key='wk_asof')
     st.caption('All components use this exact trade date. Missing months block a quote.')
     customer=st.text_input('Customer',value=defaults['customer'],key='wk_customer')
+    utility=st.text_input('Utility',value='',placeholder='Serving utility name',key='wk_utility')
+    client_location=st.text_input('Client location (address or city)',value='',placeholder='Street address or city, state',key='wk_client_location')
+    facility_type=st.selectbox('Facility type',['Housing','Commercial','Industrial','Other'],index=None,placeholder='Select facility type',key='wk_facility_type')
     broker_name=st.text_input('Broker name / firm',value='',key='wk_broker_name')
     offer_due=st.date_input('Offer due date',value=None,key='wk_due')
     start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date(),key='wk_start')
@@ -632,6 +635,8 @@ with summary_panel:
     pdf_panel=st.container()
 with summary_panel.container(border=True):
     st.subheader('Deal summary')
+    st.caption(f"Utility: {utility or 'Not specified'} • Facility: {facility_type or 'Not specified'}")
+    st.caption(f"Client location: {client_location or 'Not specified'}")
     st.caption(f'Broker: {broker_name or "Not specified"} • Offer due: {offer_due or "Not specified"}')
     st.caption(f'{customer} • Start {start_entered:%b %d, %Y} • {term} month term • Settlements {pd.Timestamp(asof):%b %d, %Y}')
     top=st.columns(4)
@@ -657,7 +662,7 @@ with summary_panel.container(border=True):
     st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
     st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
     st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
-    st.download_button('Download deal summary CSV',pd.DataFrame([dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),customer=customer,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
+    st.download_button('Download deal summary CSV',pd.DataFrame([dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
 vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
 a,b,c,d=st.columns(4)
 a.metric('Required index adder' if is_indexed else 'Required offer excluding pass-through',f'${target:,.4f}/MMBtu')
@@ -679,7 +684,7 @@ for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20
 scenario_table=pd.DataFrame(scenario_rows)
 with pdf_panel:
     try:
-        pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
+        pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
         st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
     except ImportError:
         st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
@@ -713,6 +718,6 @@ with t3:
     st.write('Uses actual entered monthly volumes, calendar delivery months and a single settlement snapshot. No interpolation, silent zero filling or fallback to older settlements. Daily swing observations are not converted to forward prices.')
     st.write('The capital charge is a modeled financing expense, not a full working-capital schedule. NPV separately discounts profit after that charge; initial investment and terminal recovery are additional cash flows and should not duplicate the financed operating costs. The workbook’s NPV/carry formulas and daily-volume approximation are not reproduced. This model supports fixed offers and a level adder to the same monthly purchase and sale index. It excludes utility charges, imbalance exposure, credit/collateral financing and overhead unless included in your rates.')
     st.dataframe(pd.DataFrame(selections,columns=['Hub','Product','Contract']),hide_index=True)
-export=result.reset_index(); export.insert(0,'customer',customer);export.insert(1,'trade_date',pd.Timestamp(asof));export.insert(2,'contract_start_date',str(start_entered));export.insert(3,'term_months',term);export.insert(2,'components',' + '.join(x[2] for x in selections))
+export=result.reset_index(); export['utility']=utility; export['client_location']=client_location; export['facility_type']=facility_type; export.insert(0,'customer',customer);export.insert(1,'trade_date',pd.Timestamp(asof));export.insert(2,'contract_start_date',str(start_entered));export.insert(3,'term_months',term);export.insert(2,'components',' + '.join(x[2] for x in selections))
 st.download_button('Download monthly economics CSV',export.to_csv(index=False).encode(),'rem_deal_economics.csv','text/csv')
 st.download_button('Download usage schedule CSV',usage.to_csv(index=False).encode(),'customer_usage.csv','text/csv')

@@ -440,7 +440,7 @@ def strict_fee(value):
     if re.fullmatch(r'(?:\$\s*)?0(?:\.0+)?(?:\s+details)?',text) or text in ['no fee','none','no']:return 0.
     return None
 
-def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=False):
+def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=False, limit=3):
     def key(v):return re.sub('[^a-z0-9]','',str(v).lower())
     lookup={key(c):c for c in frame.columns}
     def col(*names):
@@ -462,7 +462,8 @@ def top_competitors(frame,terms=(6,12,18,24,36,48),exclude_own=False):
     if result.empty:return result.assign(rank=pd.Series(dtype=int))
     result=result.sort_values(['term','source_price','supplier_key']).drop_duplicates(['term','supplier_key'])
     result['rank']=result.groupby('term').cumcount()+1
-    return result[result['rank']<=3].drop(columns='supplier_key').reset_index(drop=True)
+    if limit is not None:result=result[result['rank']<=limit]
+    return result.drop(columns='supplier_key').reset_index(drop=True)
 
 def fetch_competitors(utility,customer_class,exclude_own=False):
     territory=8 if utility.startswith('Columbia') else 1
@@ -480,7 +481,9 @@ def fetch_competitors(utility,customer_class,exclude_own=False):
     unit='Ccf' if any('Ccf' in h for h in header) else ('Mcf' if any('Mcf' in h for h in header) else None)
     if unit is None:raise ValueError('Competition rate unit is not confirmed.')
     ranked=top_competitors(frame,exclude_own=exclude_own)
-    return dict(rows=ranked.to_dict('records'),unit=unit,url=url,customer_class=expected,retrieved=datetime.now(ZoneInfo('America/Chicago')).isoformat(),raw_count=len(frame))
+    qualifying=top_competitors(frame,exclude_own=False,limit=None)
+    mercury=qualifying[qualifying.supplier.map(lambda name: re.sub('[^a-z0-9]','',name.lower()).startswith('mercury'))]
+    return dict(rows=ranked.to_dict('records'),mercury_rows=mercury.to_dict('records'),unit=unit,url=url,customer_class=expected,retrieved=datetime.now(ZoneInfo('America/Chicago')).isoformat(),raw_count=len(frame))
 
 
 def competitor_price_mcf(price,unit):
@@ -488,11 +491,45 @@ def competitor_price_mcf(price,unit):
     return float(price)*(10 if unit=='Ccf' else 1)
 
 
+def mercury_default_prices(market):
+    """Exact-term Mercury fixed, zero-fee offers from the full source report."""
+    defaults={}
+    for row in market.get('mercury_rows',[]):
+        n=int(row['term']);price=competitor_price_mcf(row['source_price'],market['unit'])
+        if n not in defaults or price<defaults[n]:defaults[n]=price
+    return defaults
+
+def seed_actual_offers(terms,retained,tracking,defaults):
+    """Refresh auto rows while preserving manual entries, including legacy saves."""
+    saved={int(r['Term months']):r.get('Actual offer $/Mcf') for r in retained}
+    seeded={}
+    for n in terms:
+        old=saved.get(n);meta=tracking.get(str(n),{})
+        manual=meta.get('mode')=='Manual' or (not meta and pd.notna(old))
+        seeded[n]=(float(old) if pd.notna(old) else None) if manual else defaults.get(n)
+    return seeded
+
+def actual_offer_tracking(edited,seeded,previous,defaults):
+    tracking={}
+    for row in edited:
+        n=int(row['Term months']);price=row.get('Actual offer $/Mcf');base=seeded[n]
+        changed=(pd.isna(price)!=pd.isna(base)) or (pd.notna(price) and pd.notna(base) and abs(float(price)-float(base))>1e-9)
+        manual=changed or previous.get(str(n),{}).get('mode')=='Manual'
+        # Existing saved prices are manual unless they carry automatic provenance.
+        if n not in defaults and pd.notna(base):manual=True
+        tracking[str(n)]={'mode':'Manual' if manual else 'Mercury','price':float(price) if pd.notna(price) else None}
+    return tracking
+
+@st.cache_data(ttl=3600,show_spinner=False)
+def load_market(utility,customer_class,exclude_own=False):
+    return fetch_competitors(utility,customer_class,exclude_own)
+
+
 ROOT=Path(__file__).resolve().parent
 st.set_page_config(page_title='Ohio Utility Economics',layout='wide')
 st.markdown('''<style>.block-container{max-width:1600px;padding-top:1.5rem}h1,h2,h3{color:#074f42} [data-testid="stMetric"]{border:1px solid #bdcec8;border-radius:8px;padding:10px;text-align:center;background:#f3f7f5} [data-testid="stMetricValue"]{font-size:1.3rem} [data-testid="stMetricLabel"]{justify-content:center}</style>''',unsafe_allow_html=True)
 st.title('Ohio utility supply economics')
-st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-19 • Inputs are estimates, not tariff defaults')
+st.caption('Columbia Gas of Ohio | Enbridge Gas Ohio (formerly Dominion Energy Ohio) • Build OHIO-21 • Inputs are estimates, not tariff defaults')
 
 # Durable private storage uses the same configuration as the RGM app, with separate Ohio records.
 def cfg(key,default=''):
@@ -757,6 +794,27 @@ if margin is None or overhead_seed is None or not confirmed:
 def run(n,offer=None):
     ms=months[:n]
     return evaluate_utility({r:s.iloc[:n] for r,s in schedules.items()},{r:x.reindex(ms) for r,x in route_prices.items()},configs,overhead_series.reindex(ms),margin,discount,capital,fin_days,manual_credit,return_credit,offer,sales_tax_rate=sales_tax_rate)
+market_data={};market_errors={};mercury_defaults={};default_source=None
+with st.container(border=True):
+    st.subheader('Comparable offers and Mercury defaults')
+    show_market=st.checkbox('Show current PUCO competition',value=True,key=f'oh_{uid}_show_competition')
+    default_class=st.selectbox('Mercury default customer class',['Residential','Small Commercial'],key=f'oh_{uid}_mercury_class')
+    st.caption('Actual offers default to Mercury fixed prices for the selected class and exact contract term, including Mercury listings outside the top three. Qualifying listings must show $0 monthly and termination fees. Lowest qualifying Mercury price is used when several listings match. Columbia $/Ccf is multiplied by 10 to obtain $/Mcf. DEO / Enbridge $/Mcf is used directly, with no heat-factor adjustment.')
+    if st.button('Refresh competitor offers'):
+        load_market.clear()
+        st.session_state[f'_oh_market_revision_{uid}']=st.session_state.get(f'_oh_market_revision_{uid}',0)+1
+    for customer_class in ['Residential','Small Commercial']:
+        if not show_market and not customer_class==default_class:continue
+        try:
+            with st.spinner('Reading '+customer_class+' competitor listings...'):
+                market_data[customer_class]=load_market(utility,customer_class,False)
+        except Exception as e:market_errors[customer_class]=str(e)
+    default_source=market_data.get(default_class)
+    if default_source:
+        mercury_defaults=mercury_default_prices(default_source)
+        st.caption('Mercury source retrieved '+default_source['retrieved']+' | '+default_source['url'])
+        if not mercury_defaults:st.info('No qualifying Mercury offers found for this customer class. Unmatched terms stay blank; manual prices remain available.')
+    else:st.warning('Mercury defaults unavailable: '+market_errors.get(default_class,'No source report.'))
 results={};errors={};model_results={}
 for n in TERMS:
     try:
@@ -775,10 +833,25 @@ with summary_box:
         st.markdown('**Actual offers - enter customer prices below**')
         actual_key=f'oh_{uid}_actual_prices'
         retained=st.session_state.get(actual_key,[])
-        saved_prices={int(r['Term months']):r.get('Actual offer $/Mcf') for r in retained}
-        entries=pd.DataFrame([{'Term months':n,'Model required $/Mcf':model_results[n][0]['target_price'] if n in model_results else None,'Actual offer $/Mcf':saved_prices.get(n)} for n in TERMS])
-        edited_offers=st.data_editor(entries,hide_index=True,disabled=['Term months','Model required $/Mcf'],key=f'ohgrid_actual_{uid}_{start}_{seed_version}',use_container_width=True,column_config={'Actual offer $/Mcf':st.column_config.NumberColumn('Actual offer $/Mcf',format='$%.4f',step=.01),'Model required $/Mcf':st.column_config.NumberColumn('Model required $/Mcf',format='$%.4f')})
+        tracking_key=f'oh_{uid}_actual_price_tracking'
+        previous_tracking=st.session_state.get(tracking_key,{})
+        # Legacy nonblank offers remain manual until explicitly reset.
+        for row in retained:
+            if pd.notna(row.get('Actual offer $/Mcf')):previous_tracking.setdefault(str(int(row['Term months'])),{'mode':'Manual'})
+        if st.button('Reset actual offers to current Mercury defaults'):
+            retained=[];previous_tracking={}
+            st.session_state[f'_oh_market_revision_{uid}']=st.session_state.get(f'_oh_market_revision_{uid}',0)+1
+        seeded=seed_actual_offers(TERMS,retained,previous_tracking,mercury_defaults)
+        entries=pd.DataFrame([{'Term months':n,'Model required $/Mcf':model_results[n][0]['target_price'] if n in model_results else None,'Mercury default $/Mcf':mercury_defaults.get(n),'Actual offer $/Mcf':seeded[n]} for n in TERMS])
+        default_signature=repr(sorted(mercury_defaults.items()))
+        edited_offers=st.data_editor(entries,hide_index=True,disabled=[c for c in entries if c!='Actual offer $/Mcf'],key=f'ohgrid_actual_{uid}_{start}_{seed_version}_{st.session_state.get(f"_oh_market_revision_{uid}",0)}_{default_class}_{default_signature}',use_container_width=True,column_config={'Actual offer $/Mcf':st.column_config.NumberColumn('Actual offer $/Mcf',format='$%.4f',step=.01),'Mercury default $/Mcf':st.column_config.NumberColumn('Mercury default $/Mcf',format='$%.4f'),'Model required $/Mcf':st.column_config.NumberColumn('Model required $/Mcf',format='$%.4f')})
         st.session_state[actual_key]=json.loads(edited_offers[['Term months','Actual offer $/Mcf']].to_json(orient='records'))
+        tracking=actual_offer_tracking(edited_offers.to_dict('records'),seeded,previous_tracking,mercury_defaults)
+        st.session_state[tracking_key]=tracking
+        for n in TERMS:
+            if tracking[str(n)]['mode']=='Mercury':tracking[str(n)].update(customer_class=default_class,retrieved=default_source.get('retrieved') if default_source else None,url=default_source.get('url') if default_source else None)
+        st.caption('Edit any actual offer to test a different price. Edited prices become manual overrides and survive refreshes. Reset restores current Mercury defaults for all terms. Missing or unavailable Mercury terms remain blank unless manually entered.')
+        st.dataframe(pd.DataFrame([{'Term months':n,'Price source':tracking[str(n)]['mode'] if pd.notna(tracking[str(n)]['price']) else 'Not entered','Source class':tracking[str(n)].get('customer_class','Manual') if pd.notna(tracking[str(n)]['price']) else '-'} for n in TERMS]),hide_index=True,use_container_width=True)
         actual_results={};comparison=[]
         for row in edited_offers.to_dict('records'):
             n=int(row['Term months']);price=row['Actual offer $/Mcf']
@@ -799,19 +872,13 @@ with summary_box:
 competition_report=[]
 with st.container(border=True):
     st.subheader('Top three competitor offers by term')
-    show_market=st.checkbox('Show current PUCO competition',value=True,key=f'oh_{uid}_show_competition')
-    exclude_own=False
-    st.caption('Mercury is included in the same ranking as every other supplier and appears whenever it qualifies for the top three.')
-    st.caption('All competition and offer prices are $/Mcf. Enbridge rates are unchanged; Columbia $/Ccf rates are multiplied by 10. No heat factor is applied to competitor prices. Rankings use fixed offers with explicit $0 termination and monthly fees, exact term matches, and one offer per supplier per term. Verify tax and billing inclusions when interpreting price gaps.')
-    @st.cache_data(ttl=3600,show_spinner=False)
-    def load_market(utility,customer_class,exclude_own):return fetch_competitors(utility,customer_class,exclude_own)
-    if st.button('Refresh competitor offers'):
-        load_market.clear()
+    st.caption('Mercury is included whenever it qualifies for the top three. Actual defaults also search Mercury listings outside the ranking. All displayed rates are $/Mcf; Columbia $/Ccf is multiplied by 10.')
     if show_market:
         for customer_class in ['Residential','Small Commercial']:
             st.markdown('**'+customer_class+'**')
             try:
-                with st.spinner('Reading '+customer_class+' competitor listings...'):market=load_market(utility,customer_class,exclude_own)
+                market=market_data.get(customer_class)
+                if market is None:raise ValueError(market_errors.get(customer_class,'Source unavailable.'))
                 display=[]
                 for n in TERMS:
                     matches=[r for r in market['rows'] if r['term']==n]

@@ -156,6 +156,69 @@ def standard_offers(prices, asof, selections, start, usage, fallback_profile, tr
             rows.append(dict(term_months=n,offer_price=None,break_even=None,contract_volume=None,contract_profit=None,npv=None,irr=None,discount_rate=discount,collateral_recovery_month=None,irr_status="Unavailable",projected_usage_months=projected,status=str(e)))
     return pd.DataFrame(rows)
 
+def client_savings_comparison(result, current_mode, current_rate, current_transport=0., current_index=None):
+    """Compare customer bill projections on identical delivered monthly volumes."""
+    x=result[['usage_mmbtu','market_rate','customer_rate']].copy()
+    if not np.isfinite([current_rate,current_transport]).all():raise ValueError('Existing rate and transportation must be finite.')
+    index=x.market_rate if current_index is None else pd.Series(np.asarray(current_index,dtype=float),index=x.index)
+    if current_mode=='Index + adder' and not np.isfinite(index).all():raise ValueError('Enter an existing-index projection for every contract month.')
+    x['existing_rate']=(index if current_mode=='Index + adder' else 0.)+current_rate+current_transport
+    x['proposed_cost']=x.customer_rate*x.usage_mmbtu
+    x['existing_cost']=x.existing_rate*x.usage_mmbtu
+    x['savings']=x.existing_cost-x.proposed_cost
+    total=float(x.usage_mmbtu.sum());existing=float(x.existing_cost.sum());proposed=float(x.proposed_cost.sum())
+    savings=existing-proposed
+    return x,dict(volume=total,existing_cost=existing,proposed_cost=proposed,savings=savings,annualized_savings=savings*12/len(x),savings_per_mmbtu=savings/total,savings_pct=savings/existing if existing>0 else None,existing_weighted_rate=existing/total,proposed_weighted_rate=proposed/total)
+
+
+def build_client_proposal_pdf(meta, comparison):
+    """Client-safe whitelist: no internal economics or supplier cost assumptions."""
+    from io import BytesIO
+    from xml.sax.saxutils import escape
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepInFrame
+    out=BytesIO();navy=colors.HexColor('#074F42');red=colors.HexColor('#862131');pale=colors.HexColor('#F1F5F3')
+    styles=getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='ClientBody',fontName='Helvetica',fontSize=9,leading=13,textColor=navy))
+    styles.add(ParagraphStyle(name='ClientHeading',fontName='Helvetica-Bold',fontSize=12,leading=16,textColor=navy,spaceBefore=12,spaceAfter=7))
+    styles.add(ParagraphStyle(name='ClientSmall',fontName='Helvetica',fontSize=8,leading=11,textColor=navy))
+    def p(v,style='ClientBody'):return Paragraph(escape(str(v)),styles[style])
+    def usd(v):return f'${v:,.2f}'
+    def table(rows,widths,header=True):
+        t=Table([[p(v) for v in row] for row in rows],colWidths=widths,hAlign='LEFT')
+        commands=[('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#D7E1DC'))]
+        if header:commands+=[('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,red)]
+        t.setStyle(TableStyle(commands));return t
+    logo=Image(BytesIO(get_logo_bytes()),width=290,height=290*402/2096);logo.hAlign='LEFT'
+    story=[logo,Spacer(1,12),p('NATURAL GAS OFFER & SAVINGS COMPARISON','ClientHeading'),p(meta['customer']),p(f"{meta.get('utility') or 'Utility not specified'} | {meta.get('facility_type') or 'Facility not specified'}"),p(meta.get('client_location') or 'Location not specified'),Spacer(1,8)]
+    story.append(table([['Delivery start','Contract term','Offer due'],[meta['start'],f"{meta['term']} months",meta.get('due_date') or 'Not specified']],[176]*3))
+    story.append(p('Your proposed rate','ClientHeading'))
+    story.append(p(meta['proposed_rate_text']))
+    story.append(p(meta['proposed_transport_text'],'ClientSmall'))
+    projected=meta['proposed_mode']=='Index + adder' or meta['current_mode']=='Index + adder'
+    label='Projected savings' if projected else 'Estimated savings'
+    delta=comparison['savings']
+    headline=label if delta>=0 else 'Projected additional cost' if projected else 'Estimated additional cost'
+    percent=comparison['savings_pct']
+    cards=[[headline+' over contract','Annualized '+('savings' if delta>=0 else 'additional cost'),'Reduction vs. existing' if delta>=0 else 'Increase vs. existing'],[usd(abs(delta)),usd(abs(comparison['annualized_savings'])),f'{abs(percent):.1%}' if percent is not None else 'N/A']]
+    story.extend([Spacer(1,12),table(cards,[176]*3)])
+    story.append(p('Side-by-side comparison','ClientHeading'))
+    story.append(table([['Pricing and cost','Existing contract','Our offer'],['Supplier',meta.get('current_supplier') or 'Current supplier','Riverbend Gas Marketing'],['Rate structure',meta['existing_rate_text'],meta['proposed_rate_text']],['Transportation',meta['existing_transport_text'],meta['proposed_transport_text']],['Weighted delivered rate',f"${comparison['existing_weighted_rate']:.4f}/MMBtu",f"${comparison['proposed_weighted_rate']:.4f}/MMBtu"],['Estimated contract gas cost',usd(comparison['existing_cost']),usd(comparison['proposed_cost'])]],[140,194,194]))
+    story.append(p('Usage and comparison basis','ClientHeading'))
+    story.append(p(f"Estimated contract usage: {comparison['volume']:,.0f} MMBtu. Savings per MMBtu: ${comparison['savings_per_mmbtu']:.4f}. Forward valuation date: {meta['asof']}.",'ClientSmall'))
+    note='Both cases use the same monthly usage and contract period. Annualized savings equal contract savings x 12 / contract months. Utility distribution charges, taxes and fees are excluded unless expressly included in the entered rates.'
+    if projected:note+=' Index rates and dollar savings are projections using monthly forward estimates; actual bills depend on published index prices and usage.'
+    if meta.get('different_index'):note+=' Existing-index projections were entered manually; basis differences affect savings.'
+    if meta.get('current_end'):note+=f" Existing contract ends {meta['current_end']}; comparison assumes its entered rate terms continue throughout the proposed period and excludes early-exit charges."
+    story.append(p(note,'ClientSmall'))
+    if meta.get('client_notes'):story.extend([Spacer(1,7),p(meta['client_notes'],'ClientSmall')])
+    story.extend([Spacer(1,10),p(f"Broker: {meta.get('broker_name') or 'Not specified'}",'ClientSmall'),p('Offer subject to final agreement and credit approval.','ClientSmall')])
+    def footer(c,doc):
+        c.setStrokeColor(red);c.line(42,38,570,38);c.setFillColor(navy);c.setFont('Helvetica',8);c.drawString(42,25,'Riverbend Gas Marketing | Natural gas supply proposal');c.drawRightString(570,25,str(doc.page))
+    SimpleDocTemplate(out,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=30,bottomMargin=48,title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing').build([logo,Spacer(1,12),KeepInFrame(528,630,story[2:],mode='shrink',hAlign='LEFT',vAlign='TOP')],onFirstPage=footer,onLaterPages=footer)
+    return out.getvalue()
+
 def build_summary_pdf(meta, summary, result, scenarios):
     from io import BytesIO
     from xml.sax.saxutils import escape
@@ -293,7 +356,7 @@ h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
 logo_left,logo_center,logo_right=st.columns([1,3,1])
 with logo_center:st.image(get_logo_bytes(),use_container_width=True)
 st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-02')
+st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-03')
 def workstream_config():
     def setting(name,default=''):
         try:return str(st.secrets.get(name,os.getenv(name,default)))
@@ -305,7 +368,7 @@ if '_pricing_carry' in st.session_state:
     carried=st.session_state['_pricing_carry']
     for k,v in carried.get('widgets',{}).items():
         if k not in ['wk_pricing_file','wk_asof'] and k not in st.session_state:
-            if k in ['wk_start','wk_due']:v=pd.Timestamp(v).date() if v else None
+            if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
             if k.startswith('wk_component_'):v=tuple(v)
             st.session_state[k]=v
     st.session_state['_restored_usage']=carried.get('usage',[])
@@ -317,7 +380,7 @@ if '_pending_workstream' in st.session_state:
         if k.startswith(('wk_','offer_mode_','offer_override_','usage_')):del st.session_state[k]
     for k,v in pending.get('widgets',{}).items():
         if k.startswith(('wk_','offer_mode_','offer_override_')):
-            if k in ['wk_start','wk_due']:v=pd.Timestamp(v).date() if v else None
+            if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
             if k.startswith('wk_component_'):v=tuple(v)
             st.session_state[k]=v
     st.session_state['_restored_usage']=pending.get('usage',[])
@@ -599,6 +662,29 @@ with summary_panel:
         else:
             custom_override=st.checkbox(f'Manual offer for selected {term}-month contract',key='wk_custom_override')
             quote=st.number_input(quote_label,value=(customer_adder if is_indexed else 4.),step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
+with st.expander('Client proposal - existing contract and savings inputs',expanded=False):
+    st.caption('The client proposal uses the selected offer shown in the deal summary. Change that offer above to change the price presented to the customer.')
+    client_index_name=st.text_input('Customer-facing index name',value='Houston Ship Channel monthly index',max_chars=120,key='wk_client_index_name')
+    current_supplier=st.text_input('Existing supplier',value='',max_chars=100,key='wk_client_supplier')
+    current_mode=st.radio('Existing contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_client_current_mode')
+    current_rate=st.number_input('Existing fixed rate / index adder ($/MMBtu)',value=None,step=.01,format='%.4f',key='wk_client_current_rate')
+    current_passback=st.checkbox('Existing contract adds transportation separately',value=False,key='wk_client_current_passback')
+    current_transport=st.number_input('Existing separate transportation ($/MMBtu)',value=0.,min_value=0.,step=.01,format='%.4f',key='wk_client_current_transport') if current_passback else 0.
+    current_end=st.date_input('Existing contract end date (optional)',value=None,key='wk_client_current_end')
+    different_index=False;current_index=None;existing_index_name=client_index_name
+    if current_mode=='Index + adder':
+        different_index=st.checkbox('Existing contract uses a different index',value=False,key='wk_client_different_index')
+        if different_index:
+            existing_index_name=st.text_input('Existing index name',value='',max_chars=120,key='wk_client_existing_index_name')
+            st.caption('Enter projected monthly published-index values, before the adder and transportation. No missing index estimates are filled automatically.')
+            prior_index=st.session_state.get('wk_client_index_schedule',[])
+            prior_map={row['month']:row['index'] for row in prior_index}
+            index_seed=pd.DataFrame({'month':months,'Existing projected index $/MMBtu':[prior_map.get(str(m.date())) for m in months]})
+            index_edit=st.data_editor(index_seed,disabled=['month'],hide_index=True,key=f'client_index_grid_{start}_{term}',column_config={'Existing projected index $/MMBtu':st.column_config.NumberColumn(format='$%.4f')})
+            current_index=pd.to_numeric(index_edit['Existing projected index $/MMBtu'],errors='coerce').to_numpy()
+            st.session_state['wk_client_index_schedule']=[dict(month=str(pd.Timestamp(row['month']).date()),index=(float(row['Existing projected index $/MMBtu']) if pd.notna(row['Existing projected index $/MMBtu']) else None)) for row in index_edit.to_dict('records')]
+    client_notes=st.text_input('Client-facing offer note (optional)',value='',max_chars=240,key='wk_client_notes')
+
 import json
 widget_snapshot={}
 for k,v in st.session_state.items():
@@ -688,6 +774,36 @@ with pdf_panel:
         st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
     except ImportError:
         st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
+
+st.subheader('Client proposal and savings comparison')
+if current_rate is None:
+    st.info('Enter the existing contract rate in "Client proposal - existing contract and savings inputs" to generate the client one-pager.')
+else:
+    try:
+        if (is_indexed or current_mode=='Index + adder') and not client_index_name.strip():raise ValueError('Enter a customer-facing index name.')
+        if different_index and not existing_index_name.strip():raise ValueError('Enter the existing index name.')
+        client_monthly,client_comparison=client_savings_comparison(result,current_mode,current_rate,current_transport,current_index)
+        proposed_offer=float(result.offer_rate.iloc[0])
+        proposed_rate_text=(f'{client_index_name} {"+" if proposed_offer>=0 else "-"} ${abs(proposed_offer):.4f}/MMBtu' if is_indexed else f'Fixed ${proposed_offer:.4f}/MMBtu')
+        existing_rate_text=(f'{existing_index_name} {"+" if current_rate>=0 else "-"} ${abs(current_rate):.4f}/MMBtu' if current_mode=='Index + adder' else f'Fixed ${current_rate:.4f}/MMBtu')
+        proposed_transport_text=(f'Additional ${transport:.4f}/MMBtu, passed through at cost' if transport_pass_through else 'Included in the offered rate')
+        existing_transport_text=(f'Additional ${current_transport:.4f}/MMBtu' if current_passback else 'Included in entered rate')
+        client_meta=dict(customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,due_date=str(offer_due) if offer_due else '',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),proposed_mode=pricing_mode,current_mode=current_mode,current_supplier=current_supplier,proposed_rate_text=proposed_rate_text,existing_rate_text=existing_rate_text,proposed_transport_text=proposed_transport_text,existing_transport_text=existing_transport_text,different_index=different_index,current_end=str(current_end) if current_end else '',client_notes=client_notes)
+        st.write('Our offer: '+proposed_rate_text+' | '+proposed_transport_text)
+        st.write('Existing: '+existing_rate_text+' | '+existing_transport_text)
+        client_cols=st.columns(3)
+        client_cols[0].metric('Contract savings / (additional cost)',f"${client_comparison['savings']:,.2f}")
+        client_cols[1].metric('Annualized savings / (additional cost)',f"${client_comparison['annualized_savings']:,.2f}")
+        client_cols[2].metric('Savings vs. existing',f"{client_comparison['savings_pct']:.1%}" if client_comparison['savings_pct'] is not None else 'N/A')
+        if client_comparison['savings']<0:st.info('The proposed offer is more expensive under these assumptions. The client PDF identifies the additional cost.')
+        client_export=client_monthly[['usage_mmbtu','existing_rate','customer_rate','existing_cost','proposed_cost','savings']].rename(columns={'customer_rate':'proposed_rate'})
+        st.dataframe(client_export,hide_index=False)
+        st.download_button('Download client savings schedule (CSV)',client_export.reset_index().to_csv(index=False).encode(),'Client_Savings_Comparison.csv','text/csv')
+        try:
+            client_pdf=build_client_proposal_pdf(client_meta,client_comparison)
+            st.download_button('Download client offer and savings one-pager (PDF)',client_pdf,'Riverbend_Client_Offer.pdf','application/pdf')
+        except ImportError:st.info('Add reportlab to requirements.txt to enable the client proposal PDF.')
+    except ValueError as e:st.info('Client comparison: '+str(e))
 
 st.dataframe(format_table(scenario_table),hide_index=True,use_container_width=True)
 st.caption('Monthly and annualized averages use the selected contract term. The schedule below shows actual monthly profits. NPV includes initial investment and recovery; break-even price is the volume-weighted cost including the capital charge.')

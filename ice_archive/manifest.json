@@ -408,6 +408,10 @@
       "part": "c7a5398723424f457c776fc8.parquet",
       "sha256": "ebc840ebc0f88211b22da3c397cddcc26bfcea5dcf5062ffb883f0e51ab29979"
     },
+    "input/icecleared_2026_11_04.xlsx": {
+      "part": "10fc596bb727ff7ae3fbcc23.parquet",
+      "sha256": "78884198ba742513d8149b2e88ddfb2272c23b10f661c62f012e137c2d43be11"
+    },
     "input/icecleared_gas_08_31.xlsx": {
       "part": "003483a898292b12e6b4f8f7.parquet",
       "sha256": "20b7a827127c464c56bb665869e2e258e94cf6a3a7d4106458b2941c1dd866e4"

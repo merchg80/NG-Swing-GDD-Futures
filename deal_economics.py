@@ -201,6 +201,9 @@ def build_client_proposal_pdf(meta, comparison):
         'metric':ParagraphStyle('ClientOfferMetric',fontName='ClientOfferBold',fontSize=11,leading=15,textColor=green),
         'white':ParagraphStyle('ClientOfferWhite',fontName='ClientOfferBold',fontSize=7.4,leading=10,textColor=colors.white),
     }
+    layout_scale=float(meta.get('_client_layout_scale',1.0))
+    for name in ('body','bold','small','label','heading','rate','metric','white'):
+        styles[name].fontSize*=layout_scale;styles[name].leading*=layout_scale
     def p(value,style='body'):return Paragraph(escape(str(value)).replace('\n','<br/>'),styles[style])
     def usd(value):return f'${value:,.2f}'
     def compact(rows,widths,background=None,padding=8):
@@ -227,8 +230,12 @@ def build_client_proposal_pdf(meta, comparison):
     logo=Image(BytesIO(get_logo_bytes()),width=270,height=270*402/2096);logo.hAlign='LEFT'
     brand=[logo,Spacer(1,12),p('Natural gas supply','title'),p('OFFER & SAVINGS COMPARISON','label')]
     header=compact([[brand,SavingsCard()]],[342,198],padding=0)
+    styles['rightbody']=ParagraphStyle('ClientOfferRightBody',parent=styles['bold'],alignment=2)
+    styles['rightsmall']=ParagraphStyle('ClientOfferRightSmall',parent=styles['small'],alignment=2)
+    styles['money']=ParagraphStyle('ClientOfferMoney',parent=styles['bold'],alignment=2)
+    styles['moneybody']=ParagraphStyle('ClientOfferMoneyBody',parent=styles['body'],alignment=2)
     customer=compact([[[p('PREPARED FOR','label'),Spacer(1,3),p(meta['customer'],'bold'),p(meta.get('client_location') or 'Location not specified')],
-        [p(meta.get('utility') or 'Utility not specified','bold'),p(meta.get('facility_type') or 'Facility not specified','small')]]],[342,198],padding=0)
+        [p(meta.get('utility') or 'Utility not specified','rightbody'),p(meta.get('facility_type') or 'Facility not specified','rightsmall')]]],[342,198],padding=0)
     essentials=compact([[[p('DELIVERY START','label'),p(meta['start'],'bold')],
         [p('CONTRACT TERM','label'),p(f"{meta['term']} months",'bold')],
         [p('OFFER DUE','label'),p(meta.get('due_date') or 'Not specified','bold')]]],[180]*3,pale,8)
@@ -240,7 +247,7 @@ def build_client_proposal_pdf(meta, comparison):
         ['Transportation',meta['existing_transport_text'],meta['proposed_transport_text']],
         ['Weighted delivered rate',f"${comparison['existing_weighted_rate']:,.4f}/MMBtu",f"${comparison['proposed_weighted_rate']:,.4f}/MMBtu"],
         [('Projected' if projected else 'Estimated')+' contract gas cost',usd(comparison['existing_cost']),usd(comparison['proposed_cost'])]]
-    table_rows=[[p(v,'white' if i==0 else 'bold' if i>=4 else 'body') for v in row] for i,row in enumerate(rows)]
+    table_rows=[[p(v,'white' if i==0 else 'money' if i>=4 and j>0 else 'bold' if i>=4 else 'moneybody' if i in (2,3) and j>0 else 'body') for j,v in enumerate(row)] for i,row in enumerate(rows)]
     comparison_table=compact(table_rows,[192,174,174],padding=8)
     comparison_table.setStyle(TableStyle([('BACKGROUND',(2,1),(2,-1),pale),('BACKGROUND',(0,0),(-1,0),green),('LINEBELOW',(0,1),(-1,-1),.4,line)]))
     metric_label='SAVINGS PER MMBtu' if delta>=0 else 'ADDITIONAL COST / MMBtu'
@@ -254,6 +261,9 @@ def build_client_proposal_pdf(meta, comparison):
     body=[customer,Spacer(1,12),essentials,Spacer(1,14),rate,Spacer(1,15),p('A clear comparison','heading'),Spacer(1,8),comparison_table,Spacer(1,14),metrics,Spacer(1,14),p('Comparison basis','bold'),Spacer(1,4),p(note,'small')]
     if meta.get('client_notes'):body.extend([Spacer(1,7),p(meta['client_notes'],'small')])
     body.extend([Spacer(1,10),p(f"Forward valuation: {meta['asof']} | Broker: {meta.get('broker_name') or 'Not specified'}",'small'),p('Offer subject to final agreement and credit approval.','small')])
+    body_height=sum(flow.wrap(540,10000)[1] for flow in body)
+    if body_height>562 and layout_scale>0.70:
+        return build_client_proposal_pdf(dict(meta,_client_layout_scale=max(.70,layout_scale*.94)),comparison)
     def footer(c,doc):
         c.setFillColor(green);c.rect(0,782,612,10,fill=1,stroke=0)
         c.setStrokeColor(line);c.setLineWidth(.5);c.line(36,44,576,44)
@@ -261,7 +271,7 @@ def build_client_proposal_pdf(meta, comparison):
         c.setFillColor(muted);c.setFont('ClientOffer',7.2);c.drawRightString(576,28,'Natural gas supply proposal | '+str(doc.page))
     SimpleDocTemplate(out,pagesize=(612,792),leftMargin=36,rightMargin=36,topMargin=30,bottomMargin=52,
         title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing').build(
-            [header,Spacer(1,18),KeepInFrame(540,562,body,mode='shrink',hAlign='LEFT',vAlign='TOP')],onFirstPage=footer,onLaterPages=footer)
+            [header,Spacer(1,18)]+(body if body_height<=562 else [KeepInFrame(540,562,body,mode='shrink',hAlign='CENTER',vAlign='TOP')]),onFirstPage=footer,onLaterPages=footer)
     return out.getvalue()
 
 def build_summary_pdf(meta, summary, result, scenarios):

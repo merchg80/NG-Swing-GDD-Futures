@@ -172,51 +172,96 @@ def client_savings_comparison(result, current_mode, current_rate, current_transp
 
 
 def build_client_proposal_pdf(meta, comparison):
-    """Client-safe whitelist: no internal economics or supplier cost assumptions."""
+    """Client-safe branded one-pager; all prices and savings use calculated inputs."""
     from io import BytesIO
+    from pathlib import Path
     from xml.sax.saxutils import escape
+    import reportlab
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.lib import colors
-    from reportlab.lib.styles import getSampleStyleSheet,ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepInFrame
-    out=BytesIO();navy=colors.HexColor('#074F42');red=colors.HexColor('#862131');pale=colors.HexColor('#F1F5F3')
-    styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name='ClientBody',fontName='Helvetica',fontSize=9,leading=13,textColor=navy))
-    styles.add(ParagraphStyle(name='ClientHeading',fontName='Helvetica-Bold',fontSize=12,leading=16,textColor=navy,spaceBefore=12,spaceAfter=7))
-    styles.add(ParagraphStyle(name='ClientSmall',fontName='Helvetica',fontSize=8,leading=11,textColor=navy))
-    def p(v,style='ClientBody'):return Paragraph(escape(str(v)),styles[style])
-    def usd(v):return f'${v:,.2f}'
-    def table(rows,widths,header=True):
-        t=Table([[p(v) for v in row] for row in rows],colWidths=widths,hAlign='LEFT')
-        commands=[('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('LINEBELOW',(0,0),(-1,-1),.3,colors.HexColor('#D7E1DC'))]
-        if header:commands+=[('BACKGROUND',(0,0),(-1,0),pale),('LINEBELOW',(0,0),(-1,0),1,red)]
-        t.setStyle(TableStyle(commands));return t
-    logo=Image(BytesIO(get_logo_bytes()),width=290,height=290*402/2096);logo.hAlign='LEFT'
-    story=[logo,Spacer(1,12),p('NATURAL GAS OFFER & SAVINGS COMPARISON','ClientHeading'),p(meta['customer']),p(f"{meta.get('utility') or 'Utility not specified'} | {meta.get('facility_type') or 'Facility not specified'}"),p(meta.get('client_location') or 'Location not specified'),Spacer(1,8)]
-    story.append(table([['Delivery start','Contract term','Offer due'],[meta['start'],f"{meta['term']} months",meta.get('due_date') or 'Not specified']],[176]*3))
-    story.append(p('Your proposed rate','ClientHeading'))
-    story.append(p(meta['proposed_rate_text']))
-    story.append(p(meta['proposed_transport_text'],'ClientSmall'))
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepInFrame,Flowable
+    out=BytesIO()
+    green=colors.HexColor('#005448');dark=colors.HexColor('#17332F')
+    muted=colors.HexColor('#5D706B');red=colors.HexColor('#891F32')
+    pale=colors.HexColor('#EDF5F1');line=colors.HexColor('#D8E3DE')
+    # Fonts ship with ReportLab; no separately uploaded font folder is required.
+    fonts=Path(reportlab.__file__).parent/'fonts'
+    pdfmetrics.registerFont(TTFont('ClientOffer',str(fonts/'Vera.ttf')))
+    pdfmetrics.registerFont(TTFont('ClientOfferBold',str(fonts/'VeraBd.ttf')))
+    styles={
+        'body':ParagraphStyle('ClientOfferBody',fontName='ClientOffer',fontSize=8.5,leading=12,textColor=dark),
+        'bold':ParagraphStyle('ClientOfferBoldStyle',fontName='ClientOfferBold',fontSize=8.5,leading=12,textColor=dark),
+        'small':ParagraphStyle('ClientOfferSmall',fontName='ClientOffer',fontSize=7.3,leading=10,textColor=muted),
+        'label':ParagraphStyle('ClientOfferLabel',fontName='ClientOfferBold',fontSize=7.2,leading=10,textColor=muted),
+        'heading':ParagraphStyle('ClientOfferHeading',fontName='ClientOfferBold',fontSize=14,leading=18,textColor=green),
+        'title':ParagraphStyle('ClientOfferTitle',fontName='ClientOfferBold',fontSize=20,leading=25,textColor=green),
+        'rate':ParagraphStyle('ClientOfferRate',fontName='ClientOfferBold',fontSize=18,leading=23,textColor=green),
+        'metric':ParagraphStyle('ClientOfferMetric',fontName='ClientOfferBold',fontSize=11,leading=15,textColor=green),
+        'white':ParagraphStyle('ClientOfferWhite',fontName='ClientOfferBold',fontSize=7.4,leading=10,textColor=colors.white),
+    }
+    def p(value,style='body'):return Paragraph(escape(str(value)).replace('\n','<br/>'),styles[style])
+    def usd(value):return f'${value:,.2f}'
+    def compact(rows,widths,background=None,padding=8):
+        t=Table(rows,colWidths=widths,hAlign='LEFT')
+        cmds=[('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),padding),('RIGHTPADDING',(0,0),(-1,-1),padding),('TOPPADDING',(0,0),(-1,-1),padding),('BOTTOMPADDING',(0,0),(-1,-1),padding)]
+        if background:cmds.append(('BACKGROUND',(0,0),(-1,-1),background))
+        t.setStyle(TableStyle(cmds));return t
     projected=meta['proposed_mode']=='Index + adder' or meta['current_mode']=='Index + adder'
-    label='Projected savings' if projected else 'Estimated savings'
-    delta=comparison['savings']
-    headline=label if delta>=0 else 'Projected additional cost' if projected else 'Estimated additional cost'
-    percent=comparison['savings_pct']
-    cards=[[headline+' over contract','Annualized '+('savings' if delta>=0 else 'additional cost'),'Reduction vs. existing' if delta>=0 else 'Increase vs. existing'],[usd(abs(delta)),usd(abs(comparison['annualized_savings'])),f'{abs(percent):.1%}' if percent is not None else 'N/A']]
-    story.extend([Spacer(1,12),table(cards,[176]*3)])
-    story.append(p('Side-by-side comparison','ClientHeading'))
-    story.append(table([['Pricing and cost','Existing contract','Our offer'],['Supplier',meta.get('current_supplier') or 'Current supplier','Riverbend Gas Marketing'],['Rate structure',meta['existing_rate_text'],meta['proposed_rate_text']],['Transportation',meta['existing_transport_text'],meta['proposed_transport_text']],['Weighted delivered rate',f"${comparison['existing_weighted_rate']:.4f}/MMBtu",f"${comparison['proposed_weighted_rate']:.4f}/MMBtu"],['Estimated contract gas cost',usd(comparison['existing_cost']),usd(comparison['proposed_cost'])]],[140,194,194]))
-    story.append(p('Usage and comparison basis','ClientHeading'))
-    story.append(p(f"Estimated contract usage: {comparison['volume']:,.0f} MMBtu. Savings per MMBtu: ${comparison['savings_per_mmbtu']:.4f}. Forward valuation date: {meta['asof']}.",'ClientSmall'))
-    note='Both cases use the same monthly usage and contract period. Annualized savings equal contract savings x 12 / contract months. Utility distribution charges, taxes and fees are excluded unless expressly included in the entered rates.'
+    delta=comparison['savings'];percent=comparison['savings_pct']
+    accent=green if delta>=0 else red
+    headline=('PROJECTED SAVINGS' if projected else 'POTENTIAL SAVINGS') if delta>=0 else ('PROJECTED ADDITIONAL COST' if projected else 'ESTIMATED ADDITIONAL COST')
+    class SavingsCard(Flowable):
+        def __init__(self):Flowable.__init__(self);self.width=198;self.height=112
+        def draw(self):
+            c=self.canv;c.setFillColor(accent);c.roundRect(0,0,198,112,10,fill=1,stroke=0)
+            c.setFillColor(colors.white);c.setFont('ClientOfferBold',7.7);c.drawString(14,91,headline)
+            amount=usd(abs(delta));size=30
+            while pdfmetrics.stringWidth(amount,'ClientOfferBold',size)>170 and size>12:size-=1
+            c.setFont('ClientOfferBold',size);c.drawString(14,53,amount)
+            c.setFont('ClientOffer',8);c.drawString(14,32,f"Over your {meta['term']}-month contract")
+            direction='lower' if delta>=0 else 'higher'
+            caption=f'{abs(percent):.1%} {direction} estimated gas cost' if percent is not None else 'Percentage comparison unavailable'
+            c.setFont('ClientOfferBold',7.7);c.drawString(14,13,caption)
+    logo=Image(BytesIO(get_logo_bytes()),width=270,height=270*402/2096);logo.hAlign='LEFT'
+    brand=[logo,Spacer(1,12),p('Natural gas supply','title'),p('OFFER & SAVINGS COMPARISON','label')]
+    header=compact([[brand,SavingsCard()]],[342,198],padding=0)
+    customer=compact([[[p('PREPARED FOR','label'),Spacer(1,3),p(meta['customer'],'bold'),p(meta.get('client_location') or 'Location not specified')],
+        [p(meta.get('utility') or 'Utility not specified','bold'),p(meta.get('facility_type') or 'Facility not specified','small')]]],[342,198],padding=0)
+    essentials=compact([[[p('DELIVERY START','label'),p(meta['start'],'bold')],
+        [p('CONTRACT TERM','label'),p(f"{meta['term']} months",'bold')],
+        [p('OFFER DUE','label'),p(meta.get('due_date') or 'Not specified','bold')]]],[180]*3,pale,8)
+    rate=compact([[[p('YOUR PROPOSED RATE','label'),Spacer(1,4),p(meta['proposed_rate_text'],'rate')],
+        [p('TRANSPORTATION','label'),Spacer(1,4),p(meta['proposed_transport_text'],'bold')]]],[320,220],pale,10)
+    rows=[['PRICING & COST','EXISTING CONTRACT','RIVERBEND OFFER'],
+        ['Supplier',meta.get('current_supplier') or 'Current supplier','Riverbend Gas Marketing'],
+        ['Rate structure',meta['existing_rate_text'],meta['proposed_rate_text']],
+        ['Transportation',meta['existing_transport_text'],meta['proposed_transport_text']],
+        ['Weighted delivered rate',f"${comparison['existing_weighted_rate']:,.4f}/MMBtu",f"${comparison['proposed_weighted_rate']:,.4f}/MMBtu"],
+        [('Projected' if projected else 'Estimated')+' contract gas cost',usd(comparison['existing_cost']),usd(comparison['proposed_cost'])]]
+    table_rows=[[p(v,'white' if i==0 else 'bold' if i>=4 else 'body') for v in row] for i,row in enumerate(rows)]
+    comparison_table=compact(table_rows,[192,174,174],padding=8)
+    comparison_table.setStyle(TableStyle([('BACKGROUND',(2,1),(2,-1),pale),('BACKGROUND',(0,0),(-1,0),green),('LINEBELOW',(0,1),(-1,-1),.4,line)]))
+    metric_label='SAVINGS PER MMBtu' if delta>=0 else 'ADDITIONAL COST / MMBtu'
+    metrics=compact([[[p('ESTIMATED CONTRACT USAGE','label'),p(f"{comparison['volume']:,.0f} MMBtu",'metric')],
+        [p(metric_label,'label'),p(f"${abs(comparison['savings_per_mmbtu']):,.4f}",'metric')],
+        [p('ANNUALIZED '+('SAVINGS' if delta>=0 else 'ADDITIONAL COST'),'label'),p(usd(abs(comparison['annualized_savings'])),'metric')]]],[180]*3,padding=0)
+    note='Both cases use the same monthly usage and contract period. Utility distribution charges, taxes and fees are excluded unless expressly included in the entered rates. Annualized amounts reflect the selected contract term; savings are estimates based on the usage and rates shown.'
     if projected:note+=' Index rates and dollar savings are projections using monthly forward estimates; actual bills depend on published index prices and usage.'
     if meta.get('different_index'):note+=' Existing-index projections were entered manually; basis differences affect savings.'
     if meta.get('current_end'):note+=f" Existing contract ends {meta['current_end']}; comparison assumes its entered rate terms continue throughout the proposed period and excludes early-exit charges."
-    story.append(p(note,'ClientSmall'))
-    if meta.get('client_notes'):story.extend([Spacer(1,7),p(meta['client_notes'],'ClientSmall')])
-    story.extend([Spacer(1,10),p(f"Broker: {meta.get('broker_name') or 'Not specified'}",'ClientSmall'),p('Offer subject to final agreement and credit approval.','ClientSmall')])
+    body=[customer,Spacer(1,12),essentials,Spacer(1,14),rate,Spacer(1,15),p('A clear comparison','heading'),Spacer(1,8),comparison_table,Spacer(1,14),metrics,Spacer(1,14),p('Comparison basis','bold'),Spacer(1,4),p(note,'small')]
+    if meta.get('client_notes'):body.extend([Spacer(1,7),p(meta['client_notes'],'small')])
+    body.extend([Spacer(1,10),p(f"Forward valuation: {meta['asof']} | Broker: {meta.get('broker_name') or 'Not specified'}",'small'),p('Offer subject to final agreement and credit approval.','small')])
     def footer(c,doc):
-        c.setStrokeColor(red);c.line(42,38,570,38);c.setFillColor(navy);c.setFont('Helvetica',8);c.drawString(42,25,'Riverbend Gas Marketing | Natural gas supply proposal');c.drawRightString(570,25,str(doc.page))
-    SimpleDocTemplate(out,pagesize=(612,792),leftMargin=42,rightMargin=42,topMargin=30,bottomMargin=48,title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing').build([logo,Spacer(1,12),KeepInFrame(528,630,story[2:],mode='shrink',hAlign='LEFT',vAlign='TOP')],onFirstPage=footer,onLaterPages=footer)
+        c.setFillColor(green);c.rect(0,782,612,10,fill=1,stroke=0)
+        c.setStrokeColor(line);c.setLineWidth(.5);c.line(36,44,576,44)
+        c.setFillColor(green);c.setFont('ClientOfferBold',7.4);c.drawString(36,28,'RIVERBEND GAS MARKETING')
+        c.setFillColor(muted);c.setFont('ClientOffer',7.2);c.drawRightString(576,28,'Natural gas supply proposal | '+str(doc.page))
+    SimpleDocTemplate(out,pagesize=(612,792),leftMargin=36,rightMargin=36,topMargin=30,bottomMargin=52,
+        title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing').build(
+            [header,Spacer(1,18),KeepInFrame(540,562,body,mode='shrink',hAlign='LEFT',vAlign='TOP')],onFirstPage=footer,onLaterPages=footer)
     return out.getvalue()
 
 def build_summary_pdf(meta, summary, result, scenarios):

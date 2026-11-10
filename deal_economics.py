@@ -181,7 +181,7 @@ def build_client_proposal_pdf(meta, comparison):
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.lib import colors
     from reportlab.lib.styles import ParagraphStyle
-    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepInFrame,Flowable
+    from reportlab.platypus import SimpleDocTemplate,Paragraph,Spacer,Table,TableStyle,Image,KeepInFrame,Flowable,BaseDocTemplate,Frame,PageTemplate
     out=BytesIO()
     green=colors.HexColor('#005448');dark=colors.HexColor('#17332F')
     muted=colors.HexColor('#5D706B');red=colors.HexColor('#891F32')
@@ -204,10 +204,15 @@ def build_client_proposal_pdf(meta, comparison):
     layout_scale=float(meta.get('_client_layout_scale',1.0))
     for name in ('body','bold','small','label','heading','rate','metric','white'):
         styles[name].fontSize*=layout_scale;styles[name].leading*=layout_scale
+    for name in ('label','title','heading','rate','metric','white'):
+        styles[name].alignment=1
+    styles['centerbody']=ParagraphStyle('ClientOfferCenterBody',parent=styles['body'],alignment=1)
+    styles['centerbold']=ParagraphStyle('ClientOfferCenterBold',parent=styles['bold'],alignment=1)
+    styles['centersmall']=ParagraphStyle('ClientOfferCenterSmall',parent=styles['small'],alignment=1)
     def p(value,style='body'):return Paragraph(escape(str(value)).replace('\n','<br/>'),styles[style])
     def usd(value):return f'${value:,.2f}'
     def compact(rows,widths,background=None,padding=8):
-        t=Table(rows,colWidths=widths,hAlign='LEFT')
+        t=Table(rows,colWidths=widths,hAlign='CENTER')
         cmds=[('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),padding),('RIGHTPADDING',(0,0),(-1,-1),padding),('TOPPADDING',(0,0),(-1,-1),padding),('BOTTOMPADDING',(0,0),(-1,-1),padding)]
         if background:cmds.append(('BACKGROUND',(0,0),(-1,-1),background))
         t.setStyle(TableStyle(cmds));return t
@@ -219,35 +224,37 @@ def build_client_proposal_pdf(meta, comparison):
         def __init__(self):Flowable.__init__(self);self.width=198;self.height=112
         def draw(self):
             c=self.canv;c.setFillColor(accent);c.roundRect(0,0,198,112,10,fill=1,stroke=0)
-            c.setFillColor(colors.white);c.setFont('ClientOfferBold',7.7);c.drawString(14,91,headline)
+            c.setFillColor(colors.white);c.setFont('ClientOfferBold',7.7);c.drawCentredString(99,91,headline)
             amount=usd(abs(delta));size=30
             while pdfmetrics.stringWidth(amount,'ClientOfferBold',size)>170 and size>12:size-=1
-            c.setFont('ClientOfferBold',size);c.drawString(14,53,amount)
-            c.setFont('ClientOffer',8);c.drawString(14,32,f"Over your {meta['term']}-month contract")
+            c.setFont('ClientOfferBold',size);c.drawCentredString(99,53,amount)
+            c.setFont('ClientOffer',8);c.drawCentredString(99,32,f"Over your {meta['term']}-month contract")
             direction='lower' if delta>=0 else 'higher'
             caption=f'{abs(percent):.1%} {direction} estimated gas cost' if percent is not None else 'Percentage comparison unavailable'
-            c.setFont('ClientOfferBold',7.7);c.drawString(14,13,caption)
-    logo=Image(BytesIO(get_logo_bytes()),width=270,height=270*402/2096);logo.hAlign='LEFT'
-    brand=[logo,Spacer(1,12),p('Natural gas supply','title'),p('OFFER & SAVINGS COMPARISON','label')]
+            c.setFont('ClientOfferBold',7.7);c.drawCentredString(99,13,caption)
+    logo=Image(BytesIO(get_logo_bytes()),width=270,height=270*402/2096);logo.hAlign='CENTER'
+    centered_logo=Table([[logo]],colWidths=[342],hAlign='CENTER')
+    centered_logo.setStyle(TableStyle([('ALIGN',(0,0),(-1,-1),'CENTER'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(-1,-1),0),('TOPPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),0)]))
+    brand=[centered_logo,Spacer(1,12),p('Natural gas supply','title'),p('OFFER & SAVINGS COMPARISON','label')]
     header=compact([[brand,SavingsCard()]],[342,198],padding=0)
-    styles['rightbody']=ParagraphStyle('ClientOfferRightBody',parent=styles['bold'],alignment=2)
-    styles['rightsmall']=ParagraphStyle('ClientOfferRightSmall',parent=styles['small'],alignment=2)
-    styles['money']=ParagraphStyle('ClientOfferMoney',parent=styles['bold'],alignment=2)
-    styles['moneybody']=ParagraphStyle('ClientOfferMoneyBody',parent=styles['body'],alignment=2)
-    customer=compact([[[p('PREPARED FOR','label'),Spacer(1,3),p(meta['customer'],'bold'),p(meta.get('client_location') or 'Location not specified')],
+    styles['rightbody']=ParagraphStyle('ClientOfferRightBody',parent=styles['bold'],alignment=1)
+    styles['rightsmall']=ParagraphStyle('ClientOfferRightSmall',parent=styles['small'],alignment=1)
+    styles['money']=ParagraphStyle('ClientOfferMoney',parent=styles['bold'],alignment=1)
+    styles['moneybody']=ParagraphStyle('ClientOfferMoneyBody',parent=styles['body'],alignment=1)
+    customer=compact([[[p('PREPARED FOR','label'),Spacer(1,3),p(meta['customer'],'centerbold'),p(meta.get('client_location') or 'Location not specified','centerbody')],
         [p(meta.get('utility') or 'Utility not specified','rightbody'),p(meta.get('facility_type') or 'Facility not specified','rightsmall')]]],[342,198],padding=0)
-    essentials=compact([[[p('DELIVERY START','label'),p(meta['start'],'bold')],
-        [p('CONTRACT TERM','label'),p(f"{meta['term']} months",'bold')],
-        [p('OFFER DUE','label'),p(meta.get('due_date') or 'Not specified','bold')]]],[180]*3,pale,8)
+    essentials=compact([[[p('DELIVERY START','label'),p(meta['start'],'centerbold')],
+        [p('CONTRACT TERM','label'),p(f"{meta['term']} months",'centerbold')],
+        [p('OFFER DUE','label'),p(meta.get('due_date') or 'Not specified','centerbold')]]],[180]*3,pale,8)
     rate=compact([[[p('YOUR PROPOSED RATE','label'),Spacer(1,4),p(meta['proposed_rate_text'],'rate')],
-        [p('TRANSPORTATION','label'),Spacer(1,4),p(meta['proposed_transport_text'],'bold')]]],[320,220],pale,10)
+        [p('TRANSPORTATION','label'),Spacer(1,4),p(meta['proposed_transport_text'],'centerbold')]]],[320,220],pale,10)
     rows=[['PRICING & COST','EXISTING CONTRACT','RIVERBEND OFFER'],
         ['Supplier',meta.get('current_supplier') or 'Current supplier','Riverbend Gas Marketing'],
         ['Rate structure',meta['existing_rate_text'],meta['proposed_rate_text']],
         ['Transportation',meta['existing_transport_text'],meta['proposed_transport_text']],
         ['Weighted delivered rate',f"${comparison['existing_weighted_rate']:,.4f}/MMBtu",f"${comparison['proposed_weighted_rate']:,.4f}/MMBtu"],
         [('Projected' if projected else 'Estimated')+' contract gas cost',usd(comparison['existing_cost']),usd(comparison['proposed_cost'])]]
-    table_rows=[[p(v,'white' if i==0 else 'money' if i>=4 and j>0 else 'bold' if i>=4 else 'moneybody' if i in (2,3) and j>0 else 'body') for j,v in enumerate(row)] for i,row in enumerate(rows)]
+    table_rows=[[p(v,'white' if i==0 else 'money' if i>=4 and j>0 else 'bold' if i>=4 else 'moneybody' if i in (2,3) and j>0 else 'centerbody' if j>0 else 'body') for j,v in enumerate(row)] for i,row in enumerate(rows)]
     comparison_table=compact(table_rows,[192,174,174],padding=8)
     comparison_table.setStyle(TableStyle([('BACKGROUND',(2,1),(2,-1),pale),('BACKGROUND',(0,0),(-1,0),green),('LINEBELOW',(0,1),(-1,-1),.4,line)]))
     metric_label='SAVINGS PER MMBtu' if delta>=0 else 'ADDITIONAL COST / MMBtu'
@@ -269,9 +276,14 @@ def build_client_proposal_pdf(meta, comparison):
         c.setStrokeColor(line);c.setLineWidth(.5);c.line(36,44,576,44)
         c.setFillColor(green);c.setFont('ClientOfferBold',7.4);c.drawString(36,28,'RIVERBEND GAS MARKETING')
         c.setFillColor(muted);c.setFont('ClientOffer',7.2);c.drawRightString(576,28,'Natural gas supply proposal | '+str(doc.page))
-    SimpleDocTemplate(out,pagesize=(612,792),leftMargin=36,rightMargin=36,topMargin=30,bottomMargin=52,
-        title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing').build(
-            [header,Spacer(1,18)]+(body if body_height<=562 else [KeepInFrame(540,562,body,mode='shrink',hAlign='CENTER',vAlign='TOP')]),onFirstPage=footer,onLaterPages=footer)
+    # An explicit zero-padding frame keeps the 540-point layout exactly between
+    # x=36 and x=576. SimpleDocTemplate's implicit 6-point frame padding shifts
+    # full-width tables off the page center and makes alignment inconsistent.
+    doc=BaseDocTemplate(out,pagesize=(612,792),leftMargin=36,rightMargin=36,topMargin=30,bottomMargin=52,
+        title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing')
+    frame=Frame(36,52,540,710,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0,id='ClientOfferCentered')
+    doc.addPageTemplates(PageTemplate(id='ClientOfferPage',frames=[frame],onPage=footer))
+    doc.build([header,Spacer(1,18)]+(body if body_height<=562 else [KeepInFrame(540,562,body,mode='shrink',hAlign='CENTER',vAlign='TOP')]))
     return out.getvalue()
 
 def build_summary_pdf(meta, summary, result, scenarios):

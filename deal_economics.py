@@ -384,6 +384,7 @@ def load_workstream(repo,token,path,branch='main'):
     item=github_request(repo,token,'/contents/'+path+'?ref='+quote(branch,safe=''))
     payload=json.loads(base64.b64decode(item['content']))
     if payload.get('schema_version')!=1: raise WorkstreamError('Unsupported workstream version.')
+    if payload.get('app_type')=='ohio':raise WorkstreamError('This is an Ohio campaign. Open it in the Ohio economics app.')
     return payload,item['sha']
 
 def save_workstream(repo,token,name,snapshot,branch='main',path=None,sha=None):
@@ -409,523 +410,540 @@ def get_logo_bytes():
 
 
 ROOT=Path(__file__).resolve().parent
-st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
-st.markdown("""<style>
-.block-container {max-width:1550px;padding-top:2rem;}
-h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
-[data-testid="stVerticalBlockBorderWrapper"] {border-color:#b7cbc4 !important;border-radius:12px;}
-[data-testid="stMetric"] {background:#f2f6f3;border:1px solid #d0dee5;border-radius:8px;padding:12px 6px;text-align:center;min-height:95px;}
-[data-testid="stMetricLabel"] {justify-content:center;font-size:.82rem;}
-[data-testid="stMetricValue"] {font-size:1.35rem;font-weight:600;color:#074F42;}
-[data-testid="stMetricLabel"] p {font-size:.82rem;}
-[data-testid="stNumberInput"] input {text-align:center;}
-</style>""",unsafe_allow_html=True)
-logo_left,logo_center,logo_right=st.columns([1,3,1])
-with logo_center:st.image(get_logo_bytes(),use_container_width=True)
-st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
-st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-03')
-def workstream_config():
-    def setting(name,default=''):
-        try:return str(st.secrets.get(name,os.getenv(name,default)))
-        except Exception:return os.getenv(name,default)
-    return setting('WORKSTREAM_REPO'),setting('WORKSTREAM_GITHUB_TOKEN'),setting('WORKSTREAM_BRANCH','main')
-
-ws_repo,ws_token,ws_branch=workstream_config()
-if '_pricing_carry' in st.session_state:
-    carried=st.session_state['_pricing_carry']
-    for k,v in carried.get('widgets',{}).items():
-        if k not in ['wk_pricing_file','wk_asof'] and k not in st.session_state:
-            if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
-            if k.startswith('wk_component_'):v=tuple(v)
-            st.session_state[k]=v
-    st.session_state['_restored_usage']=carried.get('usage',[])
-
-if '_pending_workstream' in st.session_state:
-    pending=st.session_state.pop('_pending_workstream')
-    st.session_state.pop('_current_snapshot',None)
-    st.session_state.pop('_pricing_carry',None)
-    st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
-    st.session_state.pop('_workstream_save_request',None)
-    for k in list(st.session_state):
-        if k.startswith(('wk_','offer_mode_','offer_override_','usage_')):del st.session_state[k]
-    for k,v in pending.get('widgets',{}).items():
-        if k.startswith(('wk_','offer_mode_','offer_override_')):
-            if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
-            if k.startswith('wk_component_'):v=tuple(v)
-            st.session_state[k]=v
-    st.session_state['_restored_usage']=pending.get('usage',[])
-    st.session_state['_saved_pricing_file']=pending.get('pricing_file')
-    st.session_state['_restore_saved_file_once']=True
-    st.session_state['_saved_trade_date']=pending.get('trade_date')
-    st.session_state['_restore_pricing']=True
-    if 'wk_credit_mode' not in pending.get('widgets',{}):st.session_state['wk_credit_mode']='Manual'
-    st.session_state['ws_latest']=False
-    st.session_state['ws_name']=pending['name']
-
-def save_current_workstream(copy=False):
-    # Streamlit callbacks run before the editor is materialized on this run.
-    # Queue the action; write only after rebuilding the current input snapshot.
-    st.session_state['_workstream_save_request']={'copy':bool(copy)}
-
-def persist_current_workstream(copy=False):
-    try:
-        snapshot=st.session_state.get('_current_snapshot')
-        if not snapshot:raise WorkstreamError('Load pricing and enter deal assumptions before saving.')
-        path,sha,payload=save_workstream(ws_repo,ws_token,st.session_state.get('ws_name',''),snapshot,ws_branch,None if copy else st.session_state.get('_ws_path'),None if copy else st.session_state.get('_ws_sha'))
-        st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
-        st.session_state['_saved_message']='Saved '+payload['name']+' at '+payload['saved_at']+' | '+f"{sum(float(r['usage_mmbtu']) for r in payload.get('usage',[])):,.0f} MMBtu across {len(payload.get('usage',[]))} months"
-        st.session_state['_last_saved_snapshot']=snapshot
-    except Exception as e:st.session_state['_save_error']=str(e)
-
-def open_workstream(path):
-    try:
-        payload,sha=load_workstream(ws_repo,ws_token,path,ws_branch)
-        st.session_state['_pending_workstream']=payload
-        st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
-        st.session_state['_saved_message']='Opened '+payload['name']+' | saved '+payload.get('saved_at','')
-    except Exception as e:st.session_state['_save_error']=str(e)
-
-with st.container(border=True):
-    st.subheader('Saved workstreams')
-    st.caption('Save a named working deal across browser refreshes and days. Saving is explicit; pricing updates do not change the saved assumptions until you save again.')
-    st.text_input('Workstream name',key='ws_name',placeholder='Customer - December 2026 evaluation')
-    if not ws_repo or not ws_token:
-        st.info('One-time setup: configure a private workstream repository and GitHub token in Streamlit Secrets to enable durable Save / Open. See the included setup guide.')
-    else:
-        if st.checkbox('Show saved workstreams',key='ws_show'):
-            try:
-                saved=list_workstreams(ws_repo,ws_token,ws_branch)
-                if saved:
-                    selected=st.selectbox('Saved workstream',saved,format_func=lambda x:x['name'])
-                    st.button('Open saved workstream',on_click=open_workstream,args=(selected['path'],))
-                else:st.caption('No saved workstreams yet. Save the current deal below.')
-            except Exception as e:st.error(str(e))
-        one,two=st.columns(2)
-        one.button('Save current workstream',on_click=save_current_workstream,disabled='_current_snapshot' not in st.session_state)
-        two.button('Save as new workstream',on_click=save_current_workstream,args=(True,),disabled='_current_snapshot' not in st.session_state)
-    if '_saved_message' in st.session_state:st.success(st.session_state['_saved_message'])
-    if '_save_error' in st.session_state:st.error(st.session_state.pop('_save_error'))
-    backup=st.file_uploader('Restore a workstream backup (optional; not pricing)',type=['json'],key='ws_backup')
-    if backup is not None and st.button('Open backup workstream'):
-        try:
-            import json
-            payload=json.loads(backup.getvalue())
-            if payload.get('schema_version')!=1:raise ValueError('Unsupported backup version')
-            st.session_state['_pending_workstream']=payload
-            st.session_state.pop('_ws_path',None);st.session_state.pop('_ws_sha',None)
-            st.rerun()
-        except Exception as e:st.error(str(e))
-    st.caption('To reprice a saved deal, select any existing file under Pricing setup and click Load selected pricing file. Customer assumptions, usage and manual offers are retained. File selection is saved with the workstream.')
-
-summary_panel=st.container()
-
-def format_table(df):
-    formats={}
-    for name in df.columns:
-        if not pd.api.types.is_numeric_dtype(df[name]): continue
-        key=str(name).lower()
-        if '%' in key: formats[name]='{:,.2f}%'
-        elif key in {'irr','gross_margin','discount_rate'}: formats[name]='{:.2%}'
-        elif any(t in key for t in ['price','profit','revenue','cost','rate','npv','spread','margin','capital','supply','broker','transport','offer','break_even']):
-            formats[name]='${:,.4f}' if any(t in key for t in ['price','rate','spread','break_even']) or '/mmbtu' in key else '${:,.0f}'
-        else: formats[name]='{:,.0f}'
-    return df.style.format(formats,na_rep='N/A')
-
-@st.cache_data(ttl=300)
-def load_location(path, modified_ns):
-    return read_prices(path)
-
-# Streamlit checks out this GitHub repository before running the app.
-# Read its input folder directly: no upload or separate GitHub credentials needed.
-input_candidates=[ROOT/'input',ROOT.parent/'input']
-INPUT_DIR=next((d for d in input_candidates if d.is_dir()),ROOT/'input')
-defaults=dict(customer='New customer', start=str(pd.Timestamp.today().to_period('M').to_timestamp().date()), transport=.35, broker=.30, margin=.18, usage={m:1700. for m in range(1,13)})
-prices=None
-with st.expander('1. Select ICE pricing file and contract dates', expanded=True):
-    st.caption('Pricing source: merchg80/NG-Swing-GDD-Futures • main branch • input folder')
-    if st.button('Refresh pricing files'):
-        load_location.clear();st.rerun()
-    if not INPUT_DIR.is_dir():
-        st.error('The repository input folder was not found. Deploy this app from merchg80/NG-Swing-GDD-Futures, branch main, with streamlit_app.py at the repository root.')
-        st.code(f'App location: {ROOT}\nExpected data folder: {ROOT / "input"}')
-        st.stop()
-    available=sorted([p for p in INPUT_DIR.rglob('*') if p.is_file() and p.suffix.lower() in {'.xlsx','.csv','.parquet'}],key=lambda p: ('ice' not in p.name.lower(),p.name.lower()))
-    if not available:
-        st.warning('The input folder contains no supported pricing files (.xlsx, .csv or .parquet).')
-        st.stop()
-    names=[str(p.relative_to(INPUT_DIR)) for p in available]
-    desired=st.session_state.get('_saved_pricing_file')
-    if st.session_state.pop('_restore_saved_file_once',False):
-        if desired in names:
-            st.session_state['wk_pricing_file']=desired
-        else:
-            st.warning('The saved pricing file is no longer available. Choose another file below.')
-    if st.session_state.get('wk_pricing_file') not in names:st.session_state.pop('wk_pricing_file',None)
-    def change_pricing_file():
-        # A user selection supersedes the old saved-workstream file reference.
-        st.session_state['_saved_pricing_file']=st.session_state.get('wk_pricing_file')
-        st.session_state.pop('_restore_saved_file_once',None)
-        if '_current_snapshot' in st.session_state:st.session_state['_pricing_carry']=st.session_state['_current_snapshot']
+def run_economics_app():
+    st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
+    from app_workflow_help import begin as begin_workflow_help
+    begin_workflow_help(st,'Texas economics')
+    st.markdown("""<style>
+    .block-container {max-width:1550px;padding-top:2rem;}
+    h1,h2,h3 {font-family:Arial,sans-serif;text-align:center;color:#074F42;}
+    [data-testid="stVerticalBlockBorderWrapper"] {border-color:#b7cbc4 !important;border-radius:12px;}
+    [data-testid="stMetric"] {background:#f2f6f3;border:1px solid #d0dee5;border-radius:8px;padding:12px 6px;text-align:center;min-height:95px;}
+    [data-testid="stMetricLabel"] {justify-content:center;font-size:.82rem;}
+    [data-testid="stMetricValue"] {font-size:1.35rem;font-weight:600;color:#074F42;}
+    [data-testid="stMetricLabel"] p {font-size:.82rem;}
+    [data-testid="stNumberInput"] input {text-align:center;}
+    </style>""",unsafe_allow_html=True)
+    logo_left,logo_center,logo_right=st.columns([1,3,1])
+    with logo_center:st.image(get_logo_bytes(),use_container_width=True)
+    st.caption('Natural gas deal economics • Monthly volume-weighted pricing')
+    st.caption('Pricing: GitHub input folder | Build TEXAS-INDEX-03')
+    def workstream_config():
+        def setting(name,default=''):
+            try:return str(st.secrets.get(name,os.getenv(name,default)))
+            except Exception:return os.getenv(name,default)
+        return setting('WORKSTREAM_REPO'),setting('WORKSTREAM_GITHUB_TOKEN'),setting('WORKSTREAM_BRANCH','main')
+    
+    ws_repo,ws_token,ws_branch=workstream_config()
+    if '_pricing_carry' in st.session_state:
+        carried=st.session_state['_pricing_carry']
+        for k,v in carried.get('widgets',{}).items():
+            if k not in ['wk_pricing_file','wk_asof'] and k not in st.session_state:
+                if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
+                if k.startswith('wk_component_'):v=tuple(v)
+                st.session_state[k]=v
+        st.session_state['_restored_usage']=carried.get('usage',[])
+    
+    if '_pending_workstream' in st.session_state:
+        pending=st.session_state.pop('_pending_workstream')
+        st.session_state.pop('_current_snapshot',None)
+        st.session_state.pop('_pricing_carry',None)
+        st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
+        st.session_state.pop('_workstream_save_request',None)
+        for k in list(st.session_state):
+            if k.startswith(('wk_','offer_mode_','offer_override_','usage_')):del st.session_state[k]
+        for k,v in pending.get('widgets',{}).items():
+            if k.startswith(('wk_','offer_mode_','offer_override_')):
+                if k in ['wk_start','wk_due','wk_client_current_end']:v=pd.Timestamp(v).date() if v else None
+                if k.startswith('wk_component_'):v=tuple(v)
+                st.session_state[k]=v
+        st.session_state['_restored_usage']=pending.get('usage',[])
+        st.session_state['_saved_pricing_file']=pending.get('pricing_file')
+        st.session_state['_restore_saved_file_once']=True
+        st.session_state['_saved_trade_date']=pending.get('trade_date')
         st.session_state['_restore_pricing']=True
-        st.session_state['_saved_trade_date']=None
-        st.session_state.pop('wk_asof',None)
-    selected_name=st.selectbox('ICE Cleared Gas pricing file',names,key='wk_pricing_file',on_change=change_pricing_file)
-    selected_path=INPUT_DIR/selected_name
-    st.caption(f'Selected repository file: input/{selected_path.relative_to(INPUT_DIR)}')
-    stamp=f'{selected_path}:{selected_path.stat().st_mtime_ns}'
-    if st.session_state.pop('_restore_pricing',False):
-        st.session_state['loaded_pricing_stamp']=stamp
-    if st.button('Load / refresh selected pricing file',type='primary'):
-        st.session_state['loaded_pricing_stamp']=stamp
-        st.session_state.pop('wk_asof',None)
-        st.session_state['_saved_trade_date']=None
-    if st.session_state.get('loaded_pricing_stamp')!=stamp:
-        st.info('Choose an existing ICE file above, then click Load / refresh selected pricing file. No upload is needed.')
-        st.stop()
-    try:
-        with st.spinner(f'Reading {selected_path.name} — large ICE files may take time…'):
-            prices=load_location(str(selected_path),selected_path.stat().st_mtime_ns)
-        st.success(f'Loaded {len(prices):,} settlement rows • latest trade date {prices.trade_date.max():%Y-%m-%d}')
-    except Exception as e:
-        st.error(f'Could not read input/{selected_path.relative_to(INPUT_DIR)}: {e}')
-        st.caption('Select an ICE settlement file with trade date, hub, product, strip, contract and settlement price columns. A daily Date-by-hub master is not a monthly forward curve.')
-        st.stop()
-    dates=sorted(prices.trade_date.unique(),reverse=True)
-    saved_date=st.session_state.get('_saved_trade_date')
-    if saved_date and pd.Timestamp(saved_date) in dates:st.session_state.setdefault('wk_asof',pd.Timestamp(saved_date))
-    if st.session_state.get('wk_asof') not in dates:st.session_state.pop('wk_asof',None)
-    asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'),key='wk_asof')
-    st.caption('All components use this exact trade date. Missing months block a quote.')
-    customer=st.text_input('Customer',value=defaults['customer'],key='wk_customer')
-    utility=st.text_input('Utility',value='',placeholder='Serving utility name',key='wk_utility')
-    client_location=st.text_input('Client location (address or city)',value='',placeholder='Street address or city, state',key='wk_client_location')
-    facility_type=st.selectbox('Facility type',['Housing','Commercial','Industrial','Other'],index=None,placeholder='Select facility type',key='wk_facility_type')
-    broker_name=st.text_input('Broker name / firm',value='',key='wk_broker_name')
-    offer_due=st.date_input('Offer due date',value=None,key='wk_due')
-    start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date(),key='wk_start')
-    start=start_entered.replace(day=1)
-    if start_entered.day!=1: st.caption('Monthly pricing uses the start month. Enter first-month usage for the remaining delivery days; usage is not automatically prorated.')
-    term=st.slider('Term (months)',min_value=1,max_value=48,value=12,step=1,key='wk_term')
-
-st.subheader('Market components')
-st.caption('Choose products by name. Additive mode follows the workbook: Henry Hub + HSC basis + HSC index adjustment. Outright mode uses one full-price product.')
-kind=st.radio('Curve construction',['Additive components','Outright fixed price'],horizontal=True,key='wk_kind')
-options=list(prices[['hub','product','contract']].drop_duplicates().itertuples(index=False,name=None))
-selections=[]
-cols=st.columns(3 if kind=='Additive components' else 1)
-for i,c in enumerate(cols):
-    preferred=['H','HXS','SHS'][i] if kind=='Additive components' else 'H'
-    idx=next((j for j,x in enumerate(options) if x[2]==preferred),0)
-    if st.session_state.get(f'wk_component_{i}') not in options:
-        if st.session_state.get(f'wk_component_{i}') is not None:st.warning(f'Saved component {i+1} is not in this pricing file. Review the replacement selection before quoting.')
-        st.session_state.pop(f'wk_component_{i}',None)
-    selections.append(c.selectbox((['Henry Hub','Basis','Index adjustment (SHS)'][i] if kind=='Additive components' else 'Outright market curve'),options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'wk_component_{i}'))
-if len(set(selections))!=len(selections): st.error('Select distinct components.');st.stop()
-st.subheader('Customer pricing structure')
-def reset_offer_structure():
-    for key in list(st.session_state):
-        if key.startswith(('offer_mode_','offer_override_')) or key in ('wk_custom_override','wk_custom_price','wk_transport_pass_through'):
-            st.session_state.pop(key,None)
-pricing_mode=st.radio('Contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_pricing_mode',on_change=reset_offer_structure)
-is_indexed=pricing_mode=='Index + adder'
-customer_adder=st.number_input('Customer adder above monthly index ($/MMBtu)',value=.38,step=.01,format='%.4f',key='wk_customer_adder') if is_indexed else .38
-supplier_premium=st.number_input('Supplier premium / discount to the same index ($/MMBtu)',value=0.,step=.01,format='%.4f',key='wk_supplier_premium')
-transport_pass_through=st.checkbox('Transportation is passed through in full to the customer',value=is_indexed,key='wk_transport_pass_through')
-deal_options=dict(pricing_mode=pricing_mode,customer_adder=customer_adder,supplier_premium=supplier_premium,transport_pass_through=transport_pass_through)
-quote_label='Index adder ($/MMBtu)' if is_indexed else 'Offer excluding transport pass-through ($/MMBtu)' if transport_pass_through else 'All-in offer ($/MMBtu)'
-break_even_label='Break-even adder ($/MMBtu)' if is_indexed else 'Break-even offer ($/MMBtu)'
-st.caption('Monthly index = Henry Hub + signed basis + signed index adjustment. Negative components remain negative. Index + adder bills that monthly index plus the customer adder. Transportation pass-through is billed separately at its cost; financing that expense still incurs the capital charge.')
-st.subheader('Deal assumptions')
-a,b,c,d=st.columns(4)
-transport=a.number_input('Upstream transport ($/delivered MMBtu)',min_value=0.,value=defaults['transport'],step=.01,format='%.4f',key='wk_transport')
-broker=b.number_input('Brokerage ($/delivered MMBtu)',min_value=0.,value=defaults['broker'],step=.01,format='%.4f',key='wk_broker')
-margin=c.number_input('Target gross margin ($/MMBtu)',value=defaults['margin'],step=.01,format='%.4f',key='wk_margin')
-fuel=d.number_input('Supply fuel retention (%)',min_value=0.,max_value=99.,value=0.,step=.1,key='wk_fuel')/100
-st.caption('Margin is after supply, transport and brokerage, after the capital charge, before overhead, other credit fees and taxes. Transport and brokerage apply to delivered usage. Fuel gross-up applies to gas supply only.')
-st.subheader('Cost of capital')
-cap1,cap2=st.columns(2)
-capital_hurdle=cap1.number_input('Annual capital hurdle (%)',min_value=0.,value=8.,step=.5,key='wk_capital')/100
-financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.,step=1.,key='wk_days')
-st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
-months=pd.date_range(start,periods=term,freq='MS')
-base=pd.DataFrame({'month':months,'usage_mmbtu':[defaults['usage'].get(m.month,0.) for m in months]})
-from boltex_usage import seed as seed_boltex_usage,is_boltex
-base=seed_boltex_usage(base,customer)
-if st.session_state.get('_restored_usage'):
-    saved_usage={pd.Timestamp(row['month']):float(row['usage_mmbtu']) for row in st.session_state['_restored_usage']}
-    base['usage_mmbtu']=[saved_usage.get(m,v) for m,v in zip(base.month,base.usage_mmbtu)]
-if is_boltex(customer) and not st.session_state.get('wk_boltex_profile_applied'):
-    # Owner supplied this profile to replace the old/default Boltex schedule once.
-    base=seed_boltex_usage(base,customer)
-    st.session_state['_restored_usage']=[dict(month=str(pd.Timestamp(r.month).date()),usage_mmbtu=float(r.usage_mmbtu)) for r in base.itertuples(index=False)]
-    st.session_state['wk_boltex_profile_applied']=True
-    st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
-st.subheader('Customer monthly usage')
-if is_boltex(customer):
-    st.caption('Boltex profile: supplied monthly history, September 2025–August 2026; repeated by calendar month for the contract period. August uses 8,246 from August 2026. Values are used unchanged in the monthly usage units; review any unit conversion separately. Saved edits take precedence after the initial profile load.')
-else:
-    st.caption('Enter total delivered MMBtu for each month. The attached workbook starts at 1,700 MMBtu/month. Values are estimates, not daily quantities.')
-usage_revision=st.session_state.get('_usage_editor_revision',0)
-usage_file=st.file_uploader('Load a saved usage schedule (optional)',type=['csv'],key=f'usage_upload_{usage_revision}')
-if usage_file is not None:
-    try:
-        loaded=pd.read_csv(usage_file)
-        loaded['month']=pd.to_datetime(loaded['month']).dt.to_period('M').dt.to_timestamp()
-        if loaded.month.duplicated().any(): raise ValueError('Duplicate usage months')
-        base['usage_mmbtu']=base.month.map(loaded.set_index('month')['usage_mmbtu'])
-        if base.usage_mmbtu.isna().any(): raise ValueError('Schedule must cover every selected month')
-    except Exception as e: st.error(f'Invalid usage schedule: {e}');st.stop()
-usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True,format='localized')},key=f'usage_{start}_{term}_{usage_revision}',use_container_width=True)
-with st.expander('Upfront credit and investment returns',expanded=True):
-    a,b,c=st.columns(3)
-    discount=a.number_input('Required annual discount rate (%)',key='wk_discount',min_value=0.,value=10.,step=.5,format='%.2f')/100
-    credit_mode=b.radio('Upfront credit sizing',['Automatic','Manual'],key='wk_credit_mode')
-    automatic_credit=credit_mode=='Automatic'
-    credit_pricing=curve(prices,asof,selections,months)
-    try:
-        credit_result,_=calculate(credit_pricing,usage.usage_mmbtu,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
-        credit_parts=required_credit(credit_result,transport)
-    except ValueError as e:
-        st.error('Unable to size credit for the selected term: '+str(e));st.stop()
-    auto_amount=float(credit_parts['total_credit'])
-    investment=auto_amount if automatic_credit else b.number_input('Manual upfront cash posted for credit ($)',key='wk_investment',min_value=0.,value=auto_amount,step=100.,format='%.2f')
-    b.metric('Upfront credit cash',f'${investment:,.2f}')
-    full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True,key='wk_full_recovery')
-    recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',key='wk_recovery',min_value=0.,value=0.,step=100.,format='%.2f')
-    c.caption(f'Credit cash recovered: ${recovery:,.2f} in month {term}')
-    st.caption(f"Automatic FT credit: ${transport:.4f} x {credit_parts['top_two_average_volume']:,.0f} MMBtu (average of the two highest-use months) = ${credit_parts['ft_credit']:,.2f}. Supply credit: {credit_parts['highest_volume']:,.0f} MMBtu x ${credit_parts['highest_supply_price']:.4f} = ${credit_parts['supply_credit']:,.2f}. Total: ${auto_amount:,.2f}.")
-    st.caption('Supply price is the selected monthly gas-supply curve, fuel-adjusted, before transportation, brokerage and marketer margin. The highest price and highest volume need not occur in the same month. One-month terms use that single month for the FT average. Negative peak supply prices are floored at zero for collateral sizing. Automatic sizing is calculated separately over each standard term; manual sizing uses your same input across all terms. Collateral is returned only at the end of that term when enabled.')
-offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
-with summary_panel:
-    with st.container(border=True):
-        st.subheader('Projected offers | standard contract terms')
-        st.caption(f'Start: {start_entered:%b %d, %Y} • Target margin after capital: ${margin:.4f}/MMBtu • Settlements: {pd.Timestamp(asof):%Y-%m-%d}')
-        st.caption(f'Shared assumptions: transport ${transport:.4f}/MMBtu | brokerage ${broker:.4f}/MMBtu | capital hurdle {capital_hurdle:.2%} | financing {financing_days:g} days | target margin ${margin:.4f}/MMBtu')
-        offer_cols=st.columns(5)
-        overrides={}
-        output_panels=[]
-        for col,row in zip(offer_cols,offers.itertuples(index=False)):
-            with col:
-                with st.container(border=True):
-                    st.markdown(f'### {row.term_months} months')
-                    if row.status!='Available':
-                        st.warning(row.status)
-                        output_panels.append(None)
-                        continue
-                    st.caption(f'Model required {"adder" if is_indexed else "offer"}: ${row.target_price:,.4f}/MMBtu')
-                    setting=st.selectbox('Offer setting',(['Entered adder','Model target','Target less $0.10','Target less $0.20','Manual price'] if is_indexed else ['Model target','Target less $0.10','Target less $0.20','Manual price']),key=f'offer_mode_{row.term_months}')
-                    if setting=='Manual price':
-                        overrides[row.term_months]=st.number_input(quote_label,value=float(row.offer_price),step=.01,format='%.4f',key=f'offer_override_{row.term_months}')
-                    elif setting=='Model target':
-                        overrides[row.term_months]=row.target_price
-                    elif setting.startswith('Target less'):
-                        overrides[row.term_months]=row.target_price-(.1 if setting=='Target less $0.10' else .2)
-                    output_panels.append(st.container())
-        offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,overrides,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
-        for panel,row in zip(output_panels,offers.itertuples(index=False)):
-            if panel is None: continue
-            with panel:
-                st.metric(quote_label,f'${row.offer_price:,.4f}')
-                if is_indexed: st.caption(f'Projected all-in: ${row.projected_all_in_price:.4f}/MMBtu')
-                st.metric(f'NPV @ {discount:.2%}',f'${row.npv:,.0f}' if pd.notna(row.npv) else 'N/A')
-                st.metric('Annualized IRR',f'{row.irr:.2%}' if pd.notna(row.irr) else 'N/A')
-                st.caption(f'Credit posted: ${row.upfront_credit:,.0f}')
-                st.caption(f'Collateral returned: ${row.credit_recovery:,.0f} in month {row.term_months}' if row.credit_recovery>0 else 'No collateral recovery included')
-                st.metric('Contract profit',f'${row.contract_profit:,.0f}')
-                st.metric('Spread ($/MMBtu)',f'${row.spread:,.4f}')
-                st.metric('Gross margin',f'{row.gross_margin:.2%}' if pd.notna(row.gross_margin) else 'N/A')
-        st.caption('Entered adder uses the shared customer adder for all indexed terms. Model target calculates the adder needed for your target margin. Manual entries remain as entered; target reductions use the model required adder / offer.')
-        st.caption(f'Credit sizing: {credit_mode}. Each card shows its own posted and recovered credit cash. Discount rate: {discount:.2%} effective annual. NPV is valued at contract start; IRR is annualized.')
-        st.caption('Each offer follows the selected pricing structure. Indexed offers show the adder above the monthly index; projected revenue uses the forward index. Full transportation pass-through is added to the bill and deducted as an equal cost. Each model target includes supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; missing calendar months use the displayed default.')
-        with st.expander('Standard offer detail and volume assumptions'):
-            st.dataframe(format_table(offers),hide_index=True,use_container_width=True)
-        st.download_button('Download standard offers CSV',offers.to_csv(index=False).encode(),'standard_contract_offers.csv','text/csv')
-with summary_panel:
-    with st.container(border=True):
-        st.subheader('Detailed summary selection')
-        st.caption(f'The summary, monthly economics, offer comparisons and PDF below use the selected {term}-month contract. Change the contract term in the pricing setup to review another term.')
-        if term in [12,18,24,36,48]:
-            quote=overrides.get(term)
-        else:
-            custom_override=st.checkbox(f'Manual offer for selected {term}-month contract',key='wk_custom_override')
-            quote=st.number_input(quote_label,value=(customer_adder if is_indexed else 4.),step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
-with st.expander('Client proposal - existing contract and savings inputs',expanded=False):
-    st.caption('The client proposal uses the selected offer shown in the deal summary. Change that offer above to change the price presented to the customer.')
-    client_index_name=st.text_input('Customer-facing index name',value='Houston Ship Channel monthly index',max_chars=120,key='wk_client_index_name')
-    current_supplier=st.text_input('Existing supplier',value='',max_chars=100,key='wk_client_supplier')
-    current_mode=st.radio('Existing contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_client_current_mode')
-    current_rate=st.number_input('Existing fixed rate / index adder ($/MMBtu)',value=None,step=.01,format='%.4f',key='wk_client_current_rate')
-    current_passback=st.checkbox('Existing contract adds transportation separately',value=False,key='wk_client_current_passback')
-    current_transport=st.number_input('Existing separate transportation ($/MMBtu)',value=0.,min_value=0.,step=.01,format='%.4f',key='wk_client_current_transport') if current_passback else 0.
-    current_end=st.date_input('Existing contract end date (optional)',value=None,key='wk_client_current_end')
-    different_index=False;current_index=None;existing_index_name=client_index_name
-    if current_mode=='Index + adder':
-        different_index=st.checkbox('Existing contract uses a different index',value=False,key='wk_client_different_index')
-        if different_index:
-            existing_index_name=st.text_input('Existing index name',value='',max_chars=120,key='wk_client_existing_index_name')
-            st.caption('Enter projected monthly published-index values, before the adder and transportation. No missing index estimates are filled automatically.')
-            prior_index=st.session_state.get('wk_client_index_schedule',[])
-            prior_map={row['month']:row['index'] for row in prior_index}
-            index_seed=pd.DataFrame({'month':months,'Existing projected index $/MMBtu':[prior_map.get(str(m.date())) for m in months]})
-            index_edit=st.data_editor(index_seed,disabled=['month'],hide_index=True,key=f'client_index_grid_{start}_{term}',column_config={'Existing projected index $/MMBtu':st.column_config.NumberColumn(format='$%.4f')})
-            current_index=pd.to_numeric(index_edit['Existing projected index $/MMBtu'],errors='coerce').to_numpy()
-            st.session_state['wk_client_index_schedule']=[dict(month=str(pd.Timestamp(row['month']).date()),index=(float(row['Existing projected index $/MMBtu']) if pd.notna(row['Existing projected index $/MMBtu']) else None)) for row in index_edit.to_dict('records')]
-    client_notes=st.text_input('Client-facing offer note (optional)',value='',max_chars=240,key='wk_client_notes')
-
-import json
-widget_snapshot={}
-for k,v in st.session_state.items():
-    if k.startswith(('wk_','offer_mode_','offer_override_')) and k not in ['wk_pricing_file','wk_asof']:
-        if hasattr(v,'isoformat'):v=v.isoformat()
-        elif isinstance(v,tuple):v=list(v)
-        widget_snapshot[k]=v
-current_usage=[dict(month=str(pd.Timestamp(row.month).date()),usage_mmbtu=float(row.usage_mmbtu)) for row in usage.itertuples(index=False)]
-snapshot=dict(pricing_structure=deal_options,credit_sizing_mode=credit_mode,calculated_credit=credit_parts,credit_posted=investment,schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=False,name=st.session_state.get('ws_name',''))
-st.session_state['_current_snapshot']=snapshot
-st.session_state['_restored_usage']=current_usage
-st.session_state.pop('_pricing_carry',None)
-request=st.session_state.pop('_workstream_save_request',None)
-if request is not None:
-    persist_current_workstream(request['copy'])
-    st.rerun()
-with summary_panel:
-    st.download_button('Download workstream backup (JSON)',json.dumps(snapshot,indent=2,allow_nan=False).encode(),'REM_Workstream.json','application/json')
-try:
-    p=curve(prices,asof,selections,months)
-    if p.isna().any().any():
-        st.error('Pricing is missing for these delivery months/components. Select another trade date, product or term.')
-        st.dataframe(p[p.isna().any(axis=1)].style.format('${:,.4f}',na_rep='Missing'));st.stop()
-    result,target=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,quote,capital_hurdle,financing_days,**deal_options)
-except ValueError as e: st.error(str(e));st.stop()
-summary=deal_summary(result,discount,investment,recovery)
-with summary_panel:
-    with st.expander('Verify collateral timing and investment cash flows'):
-        st.caption(f'For this {term}-month contract, upfront credit is posted in month 0. '+(f'Collateral is returned once, in month {term}, alongside the final operating profit.' if recovery>0 else 'No collateral repayment is included.'))
-        cash_audit=investment_cashflows(result,investment,recovery)
-        monthly_discount=(1+discount)**(1/12)-1
-        cash_audit['discount_factor']=1/(1+monthly_discount)**cash_audit.month_number
-        cash_audit['present_value']=cash_audit.net_cashflow*cash_audit.discount_factor
-        st.dataframe(cash_audit.style.format({'month_number':'{:,.0f}','operating_profit':'${:,.2f}','collateral_cashflow':'${:,.2f}','net_cashflow':'${:,.2f}','discount_factor':'{:.6f}','present_value':'${:,.2f}'}),hide_index=True,use_container_width=True)
-        st.caption(f'Sum of present values = NPV ${cash_audit.present_value.sum():,.2f}. IRR uses the same net cash-flow column, including month 0.')
-        st.download_button('Download investment cash-flow audit CSV',cash_audit.to_csv(index=False).encode(),'investment_cashflow_audit.csv','text/csv')
-
-with summary_panel:
-    pdf_panel=st.container()
-with summary_panel.container(border=True):
-    st.subheader('Deal summary')
-    st.caption(f"Utility: {utility or 'Not specified'} • Facility: {facility_type or 'Not specified'}")
-    st.caption(f"Client location: {client_location or 'Not specified'}")
-    st.caption(f'Broker: {broker_name or "Not specified"} • Offer due: {offer_due or "Not specified"}')
-    st.caption(f'{customer} • Start {start_entered:%b %d, %Y} • {term} month term • Settlements {pd.Timestamp(asof):%b %d, %Y}')
-    top=st.columns(4)
-    top[0].metric('Annual revenue (annualized)',f"${summary['annual_revenue']:,.0f}")
-    top[1].metric('Volume sold (contract MMBtu)',f"{summary['volume']:,.0f}")
-    top[2].metric('Projected weighted all-in price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
-    top[3].metric(f'NPV @ {discount:.2%} annual',f"${summary['npv']:,.0f}")
-    bottom_break_even=target-margin
-    bottom=st.columns(4)
-    bottom[3].metric(break_even_label,f'${bottom_break_even:,.4f}')
-    bottom[0].metric('IRR (annualized)',f"{summary['irr']:.2%}" if summary['irr'] is not None else 'N/A')
-    bottom[1].metric('MMBtu spread ($/MMBtu)',f"${summary['spread']:,.4f}")
-    bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
-    st.markdown('**All-in price breakdown ($/delivered MMBtu)**')
-    weighted_supply=float(result.supply_cost.sum()/result.usage_mmbtu.sum())
-    weighted_capital=float(result.capital_cost.sum()/result.usage_mmbtu.sum())
-    bridge=pd.DataFrame({'Component':['Gas supply (volume-weighted)','Transportation pass-through' if transport_pass_through else 'Transportation included','Brokerage included','Capital charge included','Marketer margin after capital','Projected weighted all-in customer price'],'Rate ($/MMBtu)':[weighted_supply,transport,broker,weighted_capital,summary['spread'],summary['contract_price']]})
-    st.dataframe(bridge.style.format({'Rate ($/MMBtu)':'${:,.4f}'}),hide_index=True,use_container_width=True)
-    st.caption('The projected all-in customer rate includes any separate transportation pass-through once. Transportation recovery and expense are equal when enabled. Brokerage, supplier premium, fuel and the financing charge reduce the remaining spread. The financing base includes transportation even when reimbursed.')
-    if is_indexed:
-        st.metric('Customer monthly index adder',f'${result.offer_rate.iloc[0]:.4f}/MMBtu')
-        st.caption('Customer settlement: monthly Henry Hub + signed basis + signed SHS adjustment + customer adder + transportation pass-through when enabled. The projected all-in price is volume-weighted, not a fixed quote.')
-    st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
-    st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
-    st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
-    st.download_button('Download deal summary CSV',pd.DataFrame([dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
-vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
-a,b,c,d=st.columns(4)
-a.metric('Required index adder' if is_indexed else 'Required offer excluding pass-through',f'${target:,.4f}/MMBtu')
-b.metric('Total contract volume',f'{vol:,.0f} MMBtu')
-c.metric('Contract gross profit',f'${gp:,.0f}')
-d.metric('Realized gross margin',f'${gp/vol:,.4f}/MMBtu')
-st.caption(f'Customer: {customer} • Settlements: {pd.Timestamp(asof):%Y-%m-%d} • Annualized gross profit: ${gp*12/term:,.0f}')
-st.subheader('Offer comparison')
-if is_indexed: st.caption('Offer and break-even columns below are adders above the monthly index. Projected all-in prices include the signed market curve and any transportation pass-through.')
-st.caption('Offer uses the proposed customer price, or target price when no proposed price is entered. Costs and volume remain constant. Break-even includes the capital charge and excludes overhead and taxes.')
-scenario_rows=[]
-scenario_monthly=pd.DataFrame(index=result.index)
-for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20',.20)]:
-    offer_price=float(result.offer_rate.iloc[0])-reduction
-    sr,_=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,offer_price,capital_hurdle,financing_days,**deal_options)
-    ss=deal_summary(sr,discount,investment,recovery)
-    scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Pricing structure':pricing_mode,'Projected all-in $/MMBtu':ss['contract_price'],'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
-    scenario_monthly[label]=sr.gross_profit
-scenario_table=pd.DataFrame(scenario_rows)
-with pdf_panel:
-    try:
-        pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
-        st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
-    except ImportError:
-        st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
-
-st.subheader('Client proposal and savings comparison')
-if current_rate is None:
-    st.info('Enter the existing contract rate in "Client proposal - existing contract and savings inputs" to generate the client one-pager.')
-else:
-    try:
-        if (is_indexed or current_mode=='Index + adder') and not client_index_name.strip():raise ValueError('Enter a customer-facing index name.')
-        if different_index and not existing_index_name.strip():raise ValueError('Enter the existing index name.')
-        client_monthly,client_comparison=client_savings_comparison(result,current_mode,current_rate,current_transport,current_index)
-        proposed_offer=float(result.offer_rate.iloc[0])
-        proposed_rate_text=(f'{client_index_name} {"+" if proposed_offer>=0 else "-"} ${abs(proposed_offer):.4f}/MMBtu' if is_indexed else f'Fixed ${proposed_offer:.4f}/MMBtu')
-        existing_rate_text=(f'{existing_index_name} {"+" if current_rate>=0 else "-"} ${abs(current_rate):.4f}/MMBtu' if current_mode=='Index + adder' else f'Fixed ${current_rate:.4f}/MMBtu')
-        proposed_transport_text=(f'Additional ${transport:.4f}/MMBtu, passed through at cost' if transport_pass_through else 'Included in the offered rate')
-        existing_transport_text=(f'Additional ${current_transport:.4f}/MMBtu' if current_passback else 'Included in entered rate')
-        client_meta=dict(customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,due_date=str(offer_due) if offer_due else '',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),proposed_mode=pricing_mode,current_mode=current_mode,current_supplier=current_supplier,proposed_rate_text=proposed_rate_text,existing_rate_text=existing_rate_text,proposed_transport_text=proposed_transport_text,existing_transport_text=existing_transport_text,different_index=different_index,current_end=str(current_end) if current_end else '',client_notes=client_notes)
-        st.write('Our offer: '+proposed_rate_text+' | '+proposed_transport_text)
-        st.write('Existing: '+existing_rate_text+' | '+existing_transport_text)
-        client_cols=st.columns(3)
-        client_cols[0].metric('Contract savings / (additional cost)',f"${client_comparison['savings']:,.2f}")
-        client_cols[1].metric('Annualized savings / (additional cost)',f"${client_comparison['annualized_savings']:,.2f}")
-        client_cols[2].metric('Savings vs. existing',f"{client_comparison['savings_pct']:.1%}" if client_comparison['savings_pct'] is not None else 'N/A')
-        if client_comparison['savings']<0:st.info('The proposed offer is more expensive under these assumptions. The client PDF identifies the additional cost.')
-        client_export=client_monthly[['usage_mmbtu','existing_rate','customer_rate','existing_cost','proposed_cost','savings']].rename(columns={'customer_rate':'proposed_rate'})
-        st.dataframe(client_export,hide_index=False)
-        st.download_button('Download client savings schedule (CSV)',client_export.reset_index().to_csv(index=False).encode(),'Client_Savings_Comparison.csv','text/csv')
+        if 'wk_credit_mode' not in pending.get('widgets',{}):st.session_state['wk_credit_mode']='Manual'
+        st.session_state['ws_latest']=False
+        st.session_state['ws_name']=pending['name']
+    
+    def save_current_workstream(copy=False):
+        # Streamlit callbacks run before the editor is materialized on this run.
+        # Queue the action; write only after rebuilding the current input snapshot.
+        st.session_state['_workstream_save_request']={'copy':bool(copy)}
+    
+    def persist_current_workstream(copy=False):
         try:
-            client_pdf=build_client_proposal_pdf(client_meta,client_comparison)
-            st.download_button('Download client offer and savings one-pager (PDF)',client_pdf,'Riverbend_Client_Offer.pdf','application/pdf')
-        except ImportError:st.info('Add reportlab to requirements.txt to enable the client proposal PDF.')
-    except ValueError as e:st.info('Client comparison: '+str(e))
+            snapshot=st.session_state.get('_current_snapshot')
+            from app_workflow_help import actor
+            if snapshot:snapshot=dict(snapshot,saved_by=actor(st),app_type='texas')
+            if not snapshot:raise WorkstreamError('Load pricing and enter deal assumptions before saving.')
+            path,sha,payload=save_workstream(ws_repo,ws_token,st.session_state.get('ws_name',''),snapshot,ws_branch,None if copy else st.session_state.get('_ws_path'),None if copy else st.session_state.get('_ws_sha'))
+            st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
+            st.session_state['_saved_message']='Saved '+payload['name']+' at '+payload['saved_at']+' | '+f"{sum(float(r['usage_mmbtu']) for r in payload.get('usage',[])):,.0f} MMBtu across {len(payload.get('usage',[]))} months"
+            st.session_state['_last_saved_snapshot']=snapshot
+        except Exception as e:st.session_state['_save_error']=str(e)
+    
+    def open_workstream(path):
+        try:
+            payload,sha=load_workstream(ws_repo,ws_token,path,ws_branch)
+            st.session_state['_pending_workstream']=payload
+            st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
+            st.session_state['_saved_message']='Opened '+payload['name']+' | saved '+payload.get('saved_at','')
+        except Exception as e:st.session_state['_save_error']=str(e)
+    
+    with st.container(border=True):
+        st.subheader('Saved workstreams')
+        st.caption('Save a named working deal across browser refreshes and days. Saving is explicit; pricing updates do not change the saved assumptions until you save again.')
+        st.text_input('Workstream name',key='ws_name',placeholder='Customer - December 2026 evaluation')
+        if not ws_repo or not ws_token:
+            st.info('One-time setup: configure a private workstream repository and GitHub token in Streamlit Secrets to enable durable Save / Open. See the included setup guide.')
+        else:
+            if st.checkbox('Show saved workstreams',key='ws_show'):
+                try:
+                    saved=list_workstreams(ws_repo,ws_token,ws_branch)
+                    if saved:
+                        selected=st.selectbox('Saved workstream',saved,format_func=lambda x:x['name'])
+                        st.button('Open saved workstream',on_click=open_workstream,args=(selected['path'],))
+                    else:st.caption('No saved workstreams yet. Save the current deal below.')
+                except Exception as e:st.error(str(e))
+            one,two=st.columns(2)
+            one.button('Save current workstream',on_click=save_current_workstream,disabled='_current_snapshot' not in st.session_state)
+            two.button('Save as new workstream',on_click=save_current_workstream,args=(True,),disabled='_current_snapshot' not in st.session_state)
+        if '_saved_message' in st.session_state:st.success(st.session_state['_saved_message'])
+        if '_save_error' in st.session_state:st.error(st.session_state.pop('_save_error'))
+        backup=st.file_uploader('Restore a workstream backup (optional; not pricing)',type=['json'],key='ws_backup')
+        if backup is not None and st.button('Open backup workstream'):
+            try:
+                import json
+                payload=json.loads(backup.getvalue())
+                if payload.get('schema_version')!=1:raise ValueError('Unsupported backup version')
+                st.session_state['_pending_workstream']=payload
+                st.session_state.pop('_ws_path',None);st.session_state.pop('_ws_sha',None)
+                st.rerun()
+            except Exception as e:st.error(str(e))
+        st.caption('To reprice a saved deal, select any existing file under Pricing setup and click Load selected pricing file. Customer assumptions, usage and manual offers are retained. File selection is saved with the workstream.')
+    
+    summary_panel=st.container()
+    
+    def format_table(df):
+        formats={}
+        for name in df.columns:
+            if not pd.api.types.is_numeric_dtype(df[name]): continue
+            key=str(name).lower()
+            if '%' in key: formats[name]='{:,.2f}%'
+            elif key in {'irr','gross_margin','discount_rate'}: formats[name]='{:.2%}'
+            elif any(t in key for t in ['price','profit','revenue','cost','rate','npv','spread','margin','capital','supply','broker','transport','offer','break_even']):
+                formats[name]='${:,.4f}' if any(t in key for t in ['price','rate','spread','break_even']) or '/mmbtu' in key else '${:,.0f}'
+            else: formats[name]='{:,.0f}'
+        return df.style.format(formats,na_rep='N/A')
+    
+    @st.cache_data(ttl=300)
+    def load_location(path, modified_ns):
+        return read_prices(path)
+    
+    # Streamlit checks out this GitHub repository before running the app.
+    # Read its input folder directly: no upload or separate GitHub credentials needed.
+    input_candidates=[ROOT/'input',ROOT.parent/'input']
+    INPUT_DIR=next((d for d in input_candidates if d.is_dir()),ROOT/'input')
+    defaults=dict(customer='New customer', start=str(pd.Timestamp.today().to_period('M').to_timestamp().date()), transport=.35, broker=.30, margin=.18, usage={m:1700. for m in range(1,13)})
+    prices=None
+    with st.expander('1. Select ICE pricing file and contract dates', expanded=True):
+        st.caption('Pricing source: merchg80/NG-Swing-GDD-Futures • main branch • input folder')
+        if st.button('Refresh pricing files'):
+            load_location.clear();st.rerun()
+        if not INPUT_DIR.is_dir():
+            st.error('The repository input folder was not found. Deploy this app from merchg80/NG-Swing-GDD-Futures, branch main, with streamlit_app.py at the repository root.')
+            st.code(f'App location: {ROOT}\nExpected data folder: {ROOT / "input"}')
+            st.stop()
+        available=sorted([p for p in INPUT_DIR.rglob('*') if p.is_file() and p.suffix.lower() in {'.xlsx','.csv','.parquet'}],key=lambda p: ('ice' not in p.name.lower(),p.name.lower()))
+        if not available:
+            st.warning('The input folder contains no supported pricing files (.xlsx, .csv or .parquet).')
+            st.stop()
+        names=[str(p.relative_to(INPUT_DIR)) for p in available]
+        desired=st.session_state.get('_saved_pricing_file')
+        if st.session_state.pop('_restore_saved_file_once',False):
+            if desired in names:
+                st.session_state['wk_pricing_file']=desired
+            else:
+                st.warning('The saved pricing file is no longer available. Choose another file below.')
+        if st.session_state.get('wk_pricing_file') not in names:st.session_state.pop('wk_pricing_file',None)
+        def change_pricing_file():
+            # A user selection supersedes the old saved-workstream file reference.
+            st.session_state['_saved_pricing_file']=st.session_state.get('wk_pricing_file')
+            st.session_state.pop('_restore_saved_file_once',None)
+            if '_current_snapshot' in st.session_state:st.session_state['_pricing_carry']=st.session_state['_current_snapshot']
+            st.session_state['_restore_pricing']=True
+            st.session_state['_saved_trade_date']=None
+            st.session_state.pop('wk_asof',None)
+        selected_name=st.selectbox('ICE Cleared Gas pricing file',names,key='wk_pricing_file',on_change=change_pricing_file)
+        selected_path=INPUT_DIR/selected_name
+        st.caption(f'Selected repository file: input/{selected_path.relative_to(INPUT_DIR)}')
+        stamp=f'{selected_path}:{selected_path.stat().st_mtime_ns}'
+        if st.session_state.pop('_restore_pricing',False):
+            st.session_state['loaded_pricing_stamp']=stamp
+        if st.button('Load / refresh selected pricing file',type='primary'):
+            st.session_state['loaded_pricing_stamp']=stamp
+            st.session_state.pop('wk_asof',None)
+            st.session_state['_saved_trade_date']=None
+        if st.session_state.get('loaded_pricing_stamp')!=stamp:
+            st.info('Choose an existing ICE file above, then click Load / refresh selected pricing file. No upload is needed.')
+            st.stop()
+        try:
+            with st.spinner(f'Reading {selected_path.name} — large ICE files may take time…'):
+                prices=load_location(str(selected_path),selected_path.stat().st_mtime_ns)
+            st.success(f'Loaded {len(prices):,} settlement rows • latest trade date {prices.trade_date.max():%Y-%m-%d}')
+        except Exception as e:
+            st.error(f'Could not read input/{selected_path.relative_to(INPUT_DIR)}: {e}')
+            st.caption('Select an ICE settlement file with trade date, hub, product, strip, contract and settlement price columns. A daily Date-by-hub master is not a monthly forward curve.')
+            st.stop()
+        dates=sorted(prices.trade_date.unique(),reverse=True)
+        saved_date=st.session_state.get('_saved_trade_date')
+        if saved_date and pd.Timestamp(saved_date) in dates:st.session_state.setdefault('wk_asof',pd.Timestamp(saved_date))
+        if st.session_state.get('wk_asof') not in dates:st.session_state.pop('wk_asof',None)
+        asof=st.selectbox('Settlement trade date',dates,format_func=lambda d:pd.Timestamp(d).strftime('%b %d, %Y'),key='wk_asof')
+        st.caption('All components use this exact trade date. Missing months block a quote.')
+        customer=st.text_input('Customer',value=defaults['customer'],key='wk_customer')
+        utility=st.text_input('Utility',value='',placeholder='Serving utility name',key='wk_utility')
+        client_location=st.text_input('Client location (address or city)',value='',placeholder='Street address or city, state',key='wk_client_location')
+        facility_type=st.selectbox('Facility type',['Housing','Commercial','Industrial','Other'],index=None,placeholder='Select facility type',key='wk_facility_type')
+        broker_name=st.text_input('Broker name / firm',value='',key='wk_broker_name')
+        offer_due=st.date_input('Offer due date',value=None,key='wk_due')
+        start_entered=st.date_input('Contract start date',value=(pd.Timestamp(asof).to_period('M')+1).to_timestamp().date(),key='wk_start')
+        start=start_entered.replace(day=1)
+        if start_entered.day!=1: st.caption('Monthly pricing uses the start month. Enter first-month usage for the remaining delivery days; usage is not automatically prorated.')
+        term=st.slider('Term (months)',min_value=1,max_value=48,value=12,step=1,key='wk_term')
+    
+    st.subheader('Market components')
+    st.caption('Choose products by name. Additive mode follows the workbook: Henry Hub + HSC basis + HSC index adjustment. Outright mode uses one full-price product.')
+    kind=st.radio('Curve construction',['Additive components','Outright fixed price'],horizontal=True,key='wk_kind')
+    options=list(prices[['hub','product','contract']].drop_duplicates().itertuples(index=False,name=None))
+    selections=[]
+    cols=st.columns(3 if kind=='Additive components' else 1)
+    for i,c in enumerate(cols):
+        preferred=['H','HXS','SHS'][i] if kind=='Additive components' else 'H'
+        idx=next((j for j,x in enumerate(options) if x[2]==preferred),0)
+        if st.session_state.get(f'wk_component_{i}') not in options:
+            if st.session_state.get(f'wk_component_{i}') is not None:st.warning(f'Saved component {i+1} is not in this pricing file. Review the replacement selection before quoting.')
+            st.session_state.pop(f'wk_component_{i}',None)
+        selections.append(c.selectbox((['Henry Hub','Basis','Index adjustment (SHS)'][i] if kind=='Additive components' else 'Outright market curve'),options,index=idx,format_func=lambda x:f'{x[0]} | {x[1]} ({x[2]})',key=f'wk_component_{i}'))
+    if len(set(selections))!=len(selections): st.error('Select distinct components.');st.stop()
+    st.subheader('Customer pricing structure')
+    def reset_offer_structure():
+        for key in list(st.session_state):
+            if key.startswith(('offer_mode_','offer_override_')) or key in ('wk_custom_override','wk_custom_price','wk_transport_pass_through'):
+                st.session_state.pop(key,None)
+    pricing_mode=st.radio('Contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_pricing_mode',on_change=reset_offer_structure)
+    is_indexed=pricing_mode=='Index + adder'
+    customer_adder=st.number_input('Customer adder above monthly index ($/MMBtu)',value=.38,step=.01,format='%.4f',key='wk_customer_adder') if is_indexed else .38
+    supplier_premium=st.number_input('Supplier premium / discount to the same index ($/MMBtu)',value=0.,step=.01,format='%.4f',key='wk_supplier_premium')
+    transport_pass_through=st.checkbox('Transportation is passed through in full to the customer',value=is_indexed,key='wk_transport_pass_through')
+    deal_options=dict(pricing_mode=pricing_mode,customer_adder=customer_adder,supplier_premium=supplier_premium,transport_pass_through=transport_pass_through)
+    quote_label='Index adder ($/MMBtu)' if is_indexed else 'Offer excluding transport pass-through ($/MMBtu)' if transport_pass_through else 'All-in offer ($/MMBtu)'
+    break_even_label='Break-even adder ($/MMBtu)' if is_indexed else 'Break-even offer ($/MMBtu)'
+    st.caption('Monthly index = Henry Hub + signed basis + signed index adjustment. Negative components remain negative. Index + adder bills that monthly index plus the customer adder. Transportation pass-through is billed separately at its cost; financing that expense still incurs the capital charge.')
+    st.subheader('Deal assumptions')
+    a,b,c,d=st.columns(4)
+    transport=a.number_input('Upstream transport ($/delivered MMBtu)',min_value=0.,value=defaults['transport'],step=.01,format='%.4f',key='wk_transport')
+    broker=b.number_input('Brokerage ($/delivered MMBtu)',min_value=0.,value=defaults['broker'],step=.01,format='%.4f',key='wk_broker')
+    margin=c.number_input('Target gross margin ($/MMBtu)',value=defaults['margin'],step=.01,format='%.4f',key='wk_margin')
+    fuel=d.number_input('Supply fuel retention (%)',min_value=0.,max_value=99.,value=0.,step=.1,key='wk_fuel')/100
+    st.caption('Margin is after supply, transport and brokerage, after the capital charge, before overhead, other credit fees and taxes. Transport and brokerage apply to delivered usage. Fuel gross-up applies to gas supply only.')
+    st.subheader('Cost of capital')
+    cap1,cap2=st.columns(2)
+    capital_hurdle=cap1.number_input('Annual capital hurdle (%)',min_value=0.,value=8.,step=.5,key='wk_capital')/100
+    financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.,step=1.,key='wk_days')
+    st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
+    months=pd.date_range(start,periods=term,freq='MS')
+    base=pd.DataFrame({'month':months,'usage_mmbtu':[defaults['usage'].get(m.month,0.) for m in months]})
+    from boltex_usage import seed as seed_boltex_usage,is_boltex
+    base=seed_boltex_usage(base,customer)
+    if st.session_state.get('_restored_usage'):
+        saved_usage={pd.Timestamp(row['month']):float(row['usage_mmbtu']) for row in st.session_state['_restored_usage']}
+        base['usage_mmbtu']=[saved_usage.get(m,v) for m,v in zip(base.month,base.usage_mmbtu)]
+    if is_boltex(customer) and not st.session_state.get('wk_boltex_profile_applied'):
+        # Owner supplied this profile to replace the old/default Boltex schedule once.
+        base=seed_boltex_usage(base,customer)
+        st.session_state['_restored_usage']=[dict(month=str(pd.Timestamp(r.month).date()),usage_mmbtu=float(r.usage_mmbtu)) for r in base.itertuples(index=False)]
+        st.session_state['wk_boltex_profile_applied']=True
+        st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
+    st.subheader('Customer monthly usage')
+    if is_boltex(customer):
+        st.caption('Boltex profile: supplied monthly history, September 2025–August 2026; repeated by calendar month for the contract period. August uses 8,246 from August 2026. Values are used unchanged in the monthly usage units; review any unit conversion separately. Saved edits take precedence after the initial profile load.')
+    else:
+        st.caption('Enter total delivered MMBtu for each month. The attached workbook starts at 1,700 MMBtu/month. Values are estimates, not daily quantities.')
+    usage_revision=st.session_state.get('_usage_editor_revision',0)
+    usage_file=st.file_uploader('Load a saved usage schedule (optional)',type=['csv'],key=f'usage_upload_{usage_revision}')
+    if usage_file is not None:
+        try:
+            loaded=pd.read_csv(usage_file)
+            loaded['month']=pd.to_datetime(loaded['month']).dt.to_period('M').dt.to_timestamp()
+            if loaded.month.duplicated().any(): raise ValueError('Duplicate usage months')
+            base['usage_mmbtu']=base.month.map(loaded.set_index('month')['usage_mmbtu'])
+            if base.usage_mmbtu.isna().any(): raise ValueError('Schedule must cover every selected month')
+        except Exception as e: st.error(f'Invalid usage schedule: {e}');st.stop()
+    usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True,format='localized')},key=f'usage_{start}_{term}_{usage_revision}',use_container_width=True)
+    with st.expander('Upfront credit and investment returns',expanded=True):
+        a,b,c=st.columns(3)
+        discount=a.number_input('Required annual discount rate (%)',key='wk_discount',min_value=0.,value=10.,step=.5,format='%.2f')/100
+        credit_mode=b.radio('Upfront credit sizing',['Automatic','Manual'],key='wk_credit_mode')
+        automatic_credit=credit_mode=='Automatic'
+        credit_pricing=curve(prices,asof,selections,months)
+        try:
+            credit_result,_=calculate(credit_pricing,usage.usage_mmbtu,transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
+            credit_parts=required_credit(credit_result,transport)
+        except ValueError as e:
+            st.error('Unable to size credit for the selected term: '+str(e));st.stop()
+        auto_amount=float(credit_parts['total_credit'])
+        investment=auto_amount if automatic_credit else b.number_input('Manual upfront cash posted for credit ($)',key='wk_investment',min_value=0.,value=auto_amount,step=100.,format='%.2f')
+        b.metric('Upfront credit cash',f'${investment:,.2f}')
+        full_recovery=c.checkbox('Return all posted credit cash at contract end',value=True,key='wk_full_recovery')
+        recovery=investment if full_recovery else c.number_input('Credit cash returned at contract end ($)',key='wk_recovery',min_value=0.,value=0.,step=100.,format='%.2f')
+        c.caption(f'Credit cash recovered: ${recovery:,.2f} in month {term}')
+        st.caption(f"Automatic FT credit: ${transport:.4f} x {credit_parts['top_two_average_volume']:,.0f} MMBtu (average of the two highest-use months) = ${credit_parts['ft_credit']:,.2f}. Supply credit: {credit_parts['highest_volume']:,.0f} MMBtu x ${credit_parts['highest_supply_price']:.4f} = ${credit_parts['supply_credit']:,.2f}. Total: ${auto_amount:,.2f}.")
+        st.caption('Supply price is the selected monthly gas-supply curve, fuel-adjusted, before transportation, brokerage and marketer margin. The highest price and highest volume need not occur in the same month. One-month terms use that single month for the FT average. Negative peak supply prices are floored at zero for collateral sizing. Automatic sizing is calculated separately over each standard term; manual sizing uses your same input across all terms. Collateral is returned only at the end of that term when enabled.')
+    offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
+    with summary_panel:
+        with st.container(border=True):
+            st.subheader('Projected offers | standard contract terms')
+            st.caption(f'Start: {start_entered:%b %d, %Y} • Target margin after capital: ${margin:.4f}/MMBtu • Settlements: {pd.Timestamp(asof):%Y-%m-%d}')
+            st.caption(f'Shared assumptions: transport ${transport:.4f}/MMBtu | brokerage ${broker:.4f}/MMBtu | capital hurdle {capital_hurdle:.2%} | financing {financing_days:g} days | target margin ${margin:.4f}/MMBtu')
+            offer_cols=st.columns(5)
+            overrides={}
+            output_panels=[]
+            for col,row in zip(offer_cols,offers.itertuples(index=False)):
+                with col:
+                    with st.container(border=True):
+                        st.markdown(f'### {row.term_months} months')
+                        if row.status!='Available':
+                            st.warning(row.status)
+                            output_panels.append(None)
+                            continue
+                        st.caption(f'Model required {"adder" if is_indexed else "offer"}: ${row.target_price:,.4f}/MMBtu')
+                        setting=st.selectbox('Offer setting',(['Entered adder','Model target','Target less $0.10','Target less $0.20','Manual price'] if is_indexed else ['Model target','Target less $0.10','Target less $0.20','Manual price']),key=f'offer_mode_{row.term_months}')
+                        if setting=='Manual price':
+                            overrides[row.term_months]=st.number_input(quote_label,value=float(row.offer_price),step=.01,format='%.4f',key=f'offer_override_{row.term_months}')
+                        elif setting=='Model target':
+                            overrides[row.term_months]=row.target_price
+                        elif setting.startswith('Target less'):
+                            overrides[row.term_months]=row.target_price-(.1 if setting=='Target less $0.10' else .2)
+                        output_panels.append(st.container())
+            offers=standard_offers(prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery,overrides,automatic_credit=automatic_credit,full_credit_recovery=full_recovery,**deal_options)
+            for panel,row in zip(output_panels,offers.itertuples(index=False)):
+                if panel is None: continue
+                with panel:
+                    st.metric(quote_label,f'${row.offer_price:,.4f}')
+                    if is_indexed: st.caption(f'Projected all-in: ${row.projected_all_in_price:.4f}/MMBtu')
+                    st.metric(f'NPV @ {discount:.2%}',f'${row.npv:,.0f}' if pd.notna(row.npv) else 'N/A')
+                    st.metric('Annualized IRR',f'{row.irr:.2%}' if pd.notna(row.irr) else 'N/A')
+                    st.caption(f'Credit posted: ${row.upfront_credit:,.0f}')
+                    st.caption(f'Collateral returned: ${row.credit_recovery:,.0f} in month {row.term_months}' if row.credit_recovery>0 else 'No collateral recovery included')
+                    st.metric('Contract profit',f'${row.contract_profit:,.0f}')
+                    st.metric('Spread ($/MMBtu)',f'${row.spread:,.4f}')
+                    st.metric('Gross margin',f'{row.gross_margin:.2%}' if pd.notna(row.gross_margin) else 'N/A')
+            st.caption('Entered adder uses the shared customer adder for all indexed terms. Model target calculates the adder needed for your target margin. Manual entries remain as entered; target reductions use the model required adder / offer.')
+            st.caption(f'Credit sizing: {credit_mode}. Each card shows its own posted and recovered credit cash. Discount rate: {discount:.2%} effective annual. NPV is valued at contract start; IRR is annualized.')
+            st.caption('Each offer follows the selected pricing structure. Indexed offers show the adder above the monthly index; projected revenue uses the forward index. Full transportation pass-through is added to the bill and deducted as an equal cost. Each model target includes supply, fuel, upstream transport, brokerage, capital charge and target margin. Entered months use your exact volumes. Beyond the entered schedule, the first 12 months repeat by calendar month; missing calendar months use the displayed default.')
+            with st.expander('Standard offer detail and volume assumptions'):
+                st.dataframe(format_table(offers),hide_index=True,use_container_width=True)
+            st.download_button('Download standard offers CSV',offers.to_csv(index=False).encode(),'standard_contract_offers.csv','text/csv')
+    with summary_panel:
+        with st.container(border=True):
+            st.subheader('Detailed summary selection')
+            st.caption(f'The summary, monthly economics, offer comparisons and PDF below use the selected {term}-month contract. Change the contract term in the pricing setup to review another term.')
+            if term in [12,18,24,36,48]:
+                quote=overrides.get(term)
+            else:
+                custom_override=st.checkbox(f'Manual offer for selected {term}-month contract',key='wk_custom_override')
+                quote=st.number_input(quote_label,value=(customer_adder if is_indexed else 4.),step=.01,format='%.4f',key='wk_custom_price') if custom_override else None
+    with st.expander('Client proposal - existing contract and savings inputs',expanded=False):
+        st.caption('The client proposal uses the selected offer shown in the deal summary. Change that offer above to change the price presented to the customer.')
+        client_index_name=st.text_input('Customer-facing index name',value='Houston Ship Channel monthly index',max_chars=120,key='wk_client_index_name')
+        current_supplier=st.text_input('Existing supplier',value='',max_chars=100,key='wk_client_supplier')
+        current_mode=st.radio('Existing contract pricing',['Fixed price','Index + adder'],horizontal=True,key='wk_client_current_mode')
+        current_rate=st.number_input('Existing fixed rate / index adder ($/MMBtu)',value=None,step=.01,format='%.4f',key='wk_client_current_rate')
+        current_passback=st.checkbox('Existing contract adds transportation separately',value=False,key='wk_client_current_passback')
+        current_transport=st.number_input('Existing separate transportation ($/MMBtu)',value=0.,min_value=0.,step=.01,format='%.4f',key='wk_client_current_transport') if current_passback else 0.
+        current_end=st.date_input('Existing contract end date (optional)',value=None,key='wk_client_current_end')
+        different_index=False;current_index=None;existing_index_name=client_index_name
+        if current_mode=='Index + adder':
+            different_index=st.checkbox('Existing contract uses a different index',value=False,key='wk_client_different_index')
+            if different_index:
+                existing_index_name=st.text_input('Existing index name',value='',max_chars=120,key='wk_client_existing_index_name')
+                st.caption('Enter projected monthly published-index values, before the adder and transportation. No missing index estimates are filled automatically.')
+                prior_index=st.session_state.get('wk_client_index_schedule',[])
+                prior_map={row['month']:row['index'] for row in prior_index}
+                index_seed=pd.DataFrame({'month':months,'Existing projected index $/MMBtu':[prior_map.get(str(m.date())) for m in months]})
+                index_edit=st.data_editor(index_seed,disabled=['month'],hide_index=True,key=f'client_index_grid_{start}_{term}',column_config={'Existing projected index $/MMBtu':st.column_config.NumberColumn(format='$%.4f')})
+                current_index=pd.to_numeric(index_edit['Existing projected index $/MMBtu'],errors='coerce').to_numpy()
+                st.session_state['wk_client_index_schedule']=[dict(month=str(pd.Timestamp(row['month']).date()),index=(float(row['Existing projected index $/MMBtu']) if pd.notna(row['Existing projected index $/MMBtu']) else None)) for row in index_edit.to_dict('records')]
+        client_notes=st.text_input('Client-facing offer note (optional)',value='',max_chars=240,key='wk_client_notes')
+    
+    import json
+    widget_snapshot={}
+    for k,v in st.session_state.items():
+        if k.startswith(('wk_','offer_mode_','offer_override_')) and k not in ['wk_pricing_file','wk_asof']:
+            if hasattr(v,'isoformat'):v=v.isoformat()
+            elif isinstance(v,tuple):v=list(v)
+            widget_snapshot[k]=v
+    current_usage=[dict(month=str(pd.Timestamp(row.month).date()),usage_mmbtu=float(row.usage_mmbtu)) for row in usage.itertuples(index=False)]
+    snapshot=dict(pricing_structure=deal_options,credit_sizing_mode=credit_mode,calculated_credit=credit_parts,credit_posted=investment,schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=False,name=st.session_state.get('ws_name',''))
+    st.session_state['_current_snapshot']=snapshot
+    st.session_state['_restored_usage']=current_usage
+    st.session_state.pop('_pricing_carry',None)
+    request=st.session_state.pop('_workstream_save_request',None)
+    if request is not None:
+        persist_current_workstream(request['copy'])
+        st.rerun()
+    with summary_panel:
+        st.download_button('Download workstream backup (JSON)',json.dumps(snapshot,indent=2,allow_nan=False).encode(),'REM_Workstream.json','application/json')
+    try:
+        p=curve(prices,asof,selections,months)
+        if p.isna().any().any():
+            st.error('Pricing is missing for these delivery months/components. Select another trade date, product or term.')
+            st.dataframe(p[p.isna().any(axis=1)].style.format('${:,.4f}',na_rep='Missing'));st.stop()
+        result,target=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,quote,capital_hurdle,financing_days,**deal_options)
+    except ValueError as e: st.error(str(e));st.stop()
+    summary=deal_summary(result,discount,investment,recovery)
+    with summary_panel:
+        with st.expander('Verify collateral timing and investment cash flows'):
+            st.caption(f'For this {term}-month contract, upfront credit is posted in month 0. '+(f'Collateral is returned once, in month {term}, alongside the final operating profit.' if recovery>0 else 'No collateral repayment is included.'))
+            cash_audit=investment_cashflows(result,investment,recovery)
+            monthly_discount=(1+discount)**(1/12)-1
+            cash_audit['discount_factor']=1/(1+monthly_discount)**cash_audit.month_number
+            cash_audit['present_value']=cash_audit.net_cashflow*cash_audit.discount_factor
+            st.dataframe(cash_audit.style.format({'month_number':'{:,.0f}','operating_profit':'${:,.2f}','collateral_cashflow':'${:,.2f}','net_cashflow':'${:,.2f}','discount_factor':'{:.6f}','present_value':'${:,.2f}'}),hide_index=True,use_container_width=True)
+            st.caption(f'Sum of present values = NPV ${cash_audit.present_value.sum():,.2f}. IRR uses the same net cash-flow column, including month 0.')
+            st.download_button('Download investment cash-flow audit CSV',cash_audit.to_csv(index=False).encode(),'investment_cashflow_audit.csv','text/csv')
+    
+    with summary_panel:
+        pdf_panel=st.container()
+    with summary_panel.container(border=True):
+        st.subheader('Deal summary')
+        st.caption(f"Utility: {utility or 'Not specified'} • Facility: {facility_type or 'Not specified'}")
+        st.caption(f"Client location: {client_location or 'Not specified'}")
+        st.caption(f'Broker: {broker_name or "Not specified"} • Offer due: {offer_due or "Not specified"}')
+        st.caption(f'{customer} • Start {start_entered:%b %d, %Y} • {term} month term • Settlements {pd.Timestamp(asof):%b %d, %Y}')
+        top=st.columns(4)
+        top[0].metric('Annual revenue (annualized)',f"${summary['annual_revenue']:,.0f}")
+        top[1].metric('Volume sold (contract MMBtu)',f"{summary['volume']:,.0f}")
+        top[2].metric('Projected weighted all-in price ($/MMBtu)',f"${summary['contract_price']:,.4f}")
+        top[3].metric(f'NPV @ {discount:.2%} annual',f"${summary['npv']:,.0f}")
+        bottom_break_even=target-margin
+        bottom=st.columns(4)
+        bottom[3].metric(break_even_label,f'${bottom_break_even:,.4f}')
+        bottom[0].metric('IRR (annualized)',f"{summary['irr']:.2%}" if summary['irr'] is not None else 'N/A')
+        bottom[1].metric('MMBtu spread ($/MMBtu)',f"${summary['spread']:,.4f}")
+        bottom[2].metric('Gross margin (%)',f"{summary['gross_margin']:.2%}" if summary['gross_margin'] is not None else 'N/A')
+        st.markdown('**All-in price breakdown ($/delivered MMBtu)**')
+        weighted_supply=float(result.supply_cost.sum()/result.usage_mmbtu.sum())
+        weighted_capital=float(result.capital_cost.sum()/result.usage_mmbtu.sum())
+        bridge=pd.DataFrame({'Component':['Gas supply (volume-weighted)','Transportation pass-through' if transport_pass_through else 'Transportation included','Brokerage included','Capital charge included','Marketer margin after capital','Projected weighted all-in customer price'],'Rate ($/MMBtu)':[weighted_supply,transport,broker,weighted_capital,summary['spread'],summary['contract_price']]})
+        st.dataframe(bridge.style.format({'Rate ($/MMBtu)':'${:,.4f}'}),hide_index=True,use_container_width=True)
+        st.caption('The projected all-in customer rate includes any separate transportation pass-through once. Transportation recovery and expense are equal when enabled. Brokerage, supplier premium, fuel and the financing charge reduce the remaining spread. The financing base includes transportation even when reimbursed.')
+        if is_indexed:
+            st.metric('Customer monthly index adder',f'${result.offer_rate.iloc[0]:.4f}/MMBtu')
+            st.caption('Customer settlement: monthly Henry Hub + signed basis + signed SHS adjustment + customer adder + transportation pass-through when enabled. The projected all-in price is volume-weighted, not a fixed quote.')
+        st.caption(f'PV basis: {discount:.2%} effective annual discount rate; equivalent monthly rate {(1+discount)**(1/12)-1:.4%}. Valuation date: contract start. Monthly cash flows occur at month-end. IRR is solved independently of this rate.')
+        st.caption(f"Capital hurdle: {capital_hurdle:.1%} • Financing days: {financing_days:g} • Weighted capital charge: ${(result.capital_cost.sum()/result.usage_mmbtu.sum()):.4f}/MMBtu • Contract capital charge: ${result.capital_cost.sum():,.0f}")
+        st.caption('Annual revenue = total contract revenue × 12 ÷ term months. Spread = gross profit ÷ delivered volume. Gross margin = gross profit ÷ revenue. '+summary['irr_status']+'.')
+        st.download_button('Download deal summary CSV',pd.DataFrame([dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,offer_due_date=str(offer_due) if offer_due else '',start_date=str(start_entered),term_months=term,trade_date=str(pd.Timestamp(asof).date()),capital_hurdle=capital_hurdle,financing_days=financing_days,capital_charge_per_mmbtu=result.capital_cost.sum()/result.usage_mmbtu.sum(),annual_discount_rate=discount,credit_sizing_mode=credit_mode,automatic_ft_credit=credit_parts['ft_credit'],automatic_supply_credit=credit_parts['supply_credit'],upfront_credit_cash=investment,credit_cash_recovery=recovery,**summary)]).to_csv(index=False).encode(),'deal_summary.csv','text/csv')
+    vol=result.usage_mmbtu.sum();gp=result.gross_profit.sum()
+    a,b,c,d=st.columns(4)
+    a.metric('Required index adder' if is_indexed else 'Required offer excluding pass-through',f'${target:,.4f}/MMBtu')
+    b.metric('Total contract volume',f'{vol:,.0f} MMBtu')
+    c.metric('Contract gross profit',f'${gp:,.0f}')
+    d.metric('Realized gross margin',f'${gp/vol:,.4f}/MMBtu')
+    st.caption(f'Customer: {customer} • Settlements: {pd.Timestamp(asof):%Y-%m-%d} • Annualized gross profit: ${gp*12/term:,.0f}')
+    st.subheader('Offer comparison')
+    if is_indexed: st.caption('Offer and break-even columns below are adders above the monthly index. Projected all-in prices include the signed market curve and any transportation pass-through.')
+    st.caption('Offer uses the proposed customer price, or target price when no proposed price is entered. Costs and volume remain constant. Break-even includes the capital charge and excludes overhead and taxes.')
+    scenario_rows=[]
+    scenario_monthly=pd.DataFrame(index=result.index)
+    for label,reduction in [('Offer',0.),('Offer less $0.10',.10),('Offer less $0.20',.20)]:
+        offer_price=float(result.offer_rate.iloc[0])-reduction
+        sr,_=calculate(p,usage.usage_mmbtu,transport,broker,margin,fuel,offer_price,capital_hurdle,financing_days,**deal_options)
+        ss=deal_summary(sr,discount,investment,recovery)
+        scenario_rows.append({'Scenario':label,'Offer $/MMBtu':offer_price,'Pricing structure':pricing_mode,'Projected all-in $/MMBtu':ss['contract_price'],'Break-even $/MMBtu':target-margin,'Spread $/MMBtu':ss['spread'],'Gross margin %':ss['gross_margin']*100 if ss['gross_margin'] is not None else None,'Average monthly GP $':sr.gross_profit.sum()/term,'Annualized GP $':sr.gross_profit.sum()*12/term,'Contract GP $':sr.gross_profit.sum(),f'NPV @ {discount:.2%} $':ss['npv'],'Annual discount rate %':discount*100,'Annualized IRR %':ss['irr']*100 if ss['irr'] is not None else None})
+        scenario_monthly[label]=sr.gross_profit
+    scenario_table=pd.DataFrame(scenario_rows)
+    with pdf_panel:
+        try:
+            pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
+            st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
+        except ImportError:
+            st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
+    
+    st.subheader('Client proposal and savings comparison')
+    if current_rate is None:
+        st.info('Enter the existing contract rate in "Client proposal - existing contract and savings inputs" to generate the client one-pager.')
+    else:
+        try:
+            if (is_indexed or current_mode=='Index + adder') and not client_index_name.strip():raise ValueError('Enter a customer-facing index name.')
+            if different_index and not existing_index_name.strip():raise ValueError('Enter the existing index name.')
+            client_monthly,client_comparison=client_savings_comparison(result,current_mode,current_rate,current_transport,current_index)
+            proposed_offer=float(result.offer_rate.iloc[0])
+            proposed_rate_text=(f'{client_index_name} {"+" if proposed_offer>=0 else "-"} ${abs(proposed_offer):.4f}/MMBtu' if is_indexed else f'Fixed ${proposed_offer:.4f}/MMBtu')
+            existing_rate_text=(f'{existing_index_name} {"+" if current_rate>=0 else "-"} ${abs(current_rate):.4f}/MMBtu' if current_mode=='Index + adder' else f'Fixed ${current_rate:.4f}/MMBtu')
+            proposed_transport_text=(f'Additional ${transport:.4f}/MMBtu, passed through at cost' if transport_pass_through else 'Included in the offered rate')
+            existing_transport_text=(f'Additional ${current_transport:.4f}/MMBtu' if current_passback else 'Included in entered rate')
+            client_meta=dict(customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name,due_date=str(offer_due) if offer_due else '',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),proposed_mode=pricing_mode,current_mode=current_mode,current_supplier=current_supplier,proposed_rate_text=proposed_rate_text,existing_rate_text=existing_rate_text,proposed_transport_text=proposed_transport_text,existing_transport_text=existing_transport_text,different_index=different_index,current_end=str(current_end) if current_end else '',client_notes=client_notes)
+            st.write('Our offer: '+proposed_rate_text+' | '+proposed_transport_text)
+            st.write('Existing: '+existing_rate_text+' | '+existing_transport_text)
+            client_cols=st.columns(3)
+            client_cols[0].metric('Contract savings / (additional cost)',f"${client_comparison['savings']:,.2f}")
+            client_cols[1].metric('Annualized savings / (additional cost)',f"${client_comparison['annualized_savings']:,.2f}")
+            client_cols[2].metric('Savings vs. existing',f"{client_comparison['savings_pct']:.1%}" if client_comparison['savings_pct'] is not None else 'N/A')
+            if client_comparison['savings']<0:st.info('The proposed offer is more expensive under these assumptions. The client PDF identifies the additional cost.')
+            client_export=client_monthly[['usage_mmbtu','existing_rate','customer_rate','existing_cost','proposed_cost','savings']].rename(columns={'customer_rate':'proposed_rate'})
+            st.dataframe(client_export,hide_index=False)
+            st.download_button('Download client savings schedule (CSV)',client_export.reset_index().to_csv(index=False).encode(),'Client_Savings_Comparison.csv','text/csv')
+            try:
+                client_pdf=build_client_proposal_pdf(client_meta,client_comparison)
+                st.download_button('Download client offer and savings one-pager (PDF)',client_pdf,'Riverbend_Client_Offer.pdf','application/pdf')
+            except ImportError:st.info('Add reportlab to requirements.txt to enable the client proposal PDF.')
+        except ValueError as e:st.info('Client comparison: '+str(e))
+    
+    st.dataframe(format_table(scenario_table),hide_index=True,use_container_width=True)
+    st.caption('Monthly and annualized averages use the selected contract term. The schedule below shows actual monthly profits. NPV includes initial investment and recovery; break-even price is the volume-weighted cost including the capital charge.')
+    with st.expander('Monthly offer economics',expanded=True):
+        st.line_chart(scenario_monthly)
+        st.dataframe(format_table(scenario_monthly.reset_index().rename(columns={c:c+" profit ($)" for c in scenario_monthly.columns})), hide_index=True,use_container_width=True)
+    st.download_button('Download offer comparison CSV',scenario_table.to_csv(index=False).encode(),'offer_comparison.csv','text/csv')
+    st.download_button('Download monthly offer economics CSV',scenario_monthly.reset_index().to_csv(index=False).encode(),'monthly_offer_economics.csv','text/csv')
+    t1,t2,t3=st.tabs(['Monthly economics','Term comparisons','Method & source'])
+    with t1:
+        st.line_chart(result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']])
+        st.bar_chart(result[['gross_profit']])
+        st.dataframe(format_table(result.reset_index()),hide_index=True,use_container_width=True)
+        totals=result[['usage_mmbtu','revenue','supply_cost','transport_cost','broker_cost','capital_cost','gross_profit']].sum()
+        st.write('Contract totals')
+        st.dataframe(format_table(totals.to_frame('Total').T),hide_index=True,use_container_width=True)
+        st.write('Selected-strip averages',pd.DataFrame({'Simple average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mean(),'Volume-weighted average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mul(result.usage_mmbtu,axis=0).sum()/vol}))
+    with t2:
+        st.caption('Compares standard terms and your selected term within the entered usage schedule. Longer terms require extending the schedule above. Each term is priced separately to the same target margin.')
+        rows=[]
+        for n in sorted(set([1,3,6,12,18,24,36,48,term])):
+            if n>term or usage.usage_mmbtu.iloc[:n].sum()<=0: continue
+            r,q=calculate(p.iloc[:n],usage.usage_mmbtu.iloc[:n],transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
+            rows.append({'Months':n,'Volume MMBtu':r.usage_mmbtu.sum(),'Required adder / offer':q,'Gross profit':r.gross_profit.sum(),'Annualized GP':r.gross_profit.sum()*12/n})
+        st.dataframe(format_table(pd.DataFrame(rows)),hide_index=True)
+    with t3:
+        st.write('Indexed customer rate = signed market curve + customer adder + transport pass-through. Supply = (signed market curve + supplier premium) / (1 - fuel). Profit = revenue - supply - transport - brokerage - capital charge. Required adder = volume-weighted (all-in cost - market curve - transportation recovery) + target margin.')
+        st.write('Uses actual entered monthly volumes, calendar delivery months and a single settlement snapshot. No interpolation, silent zero filling or fallback to older settlements. Daily swing observations are not converted to forward prices.')
+        st.write('The capital charge is a modeled financing expense, not a full working-capital schedule. NPV separately discounts profit after that charge; initial investment and terminal recovery are additional cash flows and should not duplicate the financed operating costs. The workbook’s NPV/carry formulas and daily-volume approximation are not reproduced. This model supports fixed offers and a level adder to the same monthly purchase and sale index. It excludes utility charges, imbalance exposure, credit/collateral financing and overhead unless included in your rates.')
+        st.dataframe(pd.DataFrame(selections,columns=['Hub','Product','Contract']),hide_index=True)
+    export=result.reset_index(); export['utility']=utility; export['client_location']=client_location; export['facility_type']=facility_type; export.insert(0,'customer',customer);export.insert(1,'trade_date',pd.Timestamp(asof));export.insert(2,'contract_start_date',str(start_entered));export.insert(3,'term_months',term);export.insert(2,'components',' + '.join(x[2] for x in selections))
+    st.download_button('Download monthly economics CSV',export.to_csv(index=False).encode(),'rem_deal_economics.csv','text/csv')
+    st.download_button('Download usage schedule CSV',usage.to_csv(index=False).encode(),'customer_usage.csv','text/csv')
 
-st.dataframe(format_table(scenario_table),hide_index=True,use_container_width=True)
-st.caption('Monthly and annualized averages use the selected contract term. The schedule below shows actual monthly profits. NPV includes initial investment and recovery; break-even price is the volume-weighted cost including the capital charge.')
-with st.expander('Monthly offer economics',expanded=True):
-    st.line_chart(scenario_monthly)
-    st.dataframe(format_table(scenario_monthly.reset_index().rename(columns={c:c+" profit ($)" for c in scenario_monthly.columns})), hide_index=True,use_container_width=True)
-st.download_button('Download offer comparison CSV',scenario_table.to_csv(index=False).encode(),'offer_comparison.csv','text/csv')
-st.download_button('Download monthly offer economics CSV',scenario_monthly.reset_index().to_csv(index=False).encode(),'monthly_offer_economics.csv','text/csv')
-t1,t2,t3=st.tabs(['Monthly economics','Term comparisons','Method & source'])
-with t1:
-    st.line_chart(result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']])
-    st.bar_chart(result[['gross_profit']])
-    st.dataframe(format_table(result.reset_index()),hide_index=True,use_container_width=True)
-    totals=result[['usage_mmbtu','revenue','supply_cost','transport_cost','broker_cost','capital_cost','gross_profit']].sum()
-    st.write('Contract totals')
-    st.dataframe(format_table(totals.to_frame('Total').T),hide_index=True,use_container_width=True)
-    st.write('Selected-strip averages',pd.DataFrame({'Simple average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mean(),'Volume-weighted average':result[['market_rate','landed_rate','all_in_cost_rate','customer_rate']].mul(result.usage_mmbtu,axis=0).sum()/vol}))
-with t2:
-    st.caption('Compares standard terms and your selected term within the entered usage schedule. Longer terms require extending the schedule above. Each term is priced separately to the same target margin.')
-    rows=[]
-    for n in sorted(set([1,3,6,12,18,24,36,48,term])):
-        if n>term or usage.usage_mmbtu.iloc[:n].sum()<=0: continue
-        r,q=calculate(p.iloc[:n],usage.usage_mmbtu.iloc[:n],transport,broker,margin,fuel,capital_hurdle=capital_hurdle,financing_days=financing_days,**deal_options)
-        rows.append({'Months':n,'Volume MMBtu':r.usage_mmbtu.sum(),'Required adder / offer':q,'Gross profit':r.gross_profit.sum(),'Annualized GP':r.gross_profit.sum()*12/n})
-    st.dataframe(format_table(pd.DataFrame(rows)),hide_index=True)
-with t3:
-    st.write('Indexed customer rate = signed market curve + customer adder + transport pass-through. Supply = (signed market curve + supplier premium) / (1 - fuel). Profit = revenue - supply - transport - brokerage - capital charge. Required adder = volume-weighted (all-in cost - market curve - transportation recovery) + target margin.')
-    st.write('Uses actual entered monthly volumes, calendar delivery months and a single settlement snapshot. No interpolation, silent zero filling or fallback to older settlements. Daily swing observations are not converted to forward prices.')
-    st.write('The capital charge is a modeled financing expense, not a full working-capital schedule. NPV separately discounts profit after that charge; initial investment and terminal recovery are additional cash flows and should not duplicate the financed operating costs. The workbook’s NPV/carry formulas and daily-volume approximation are not reproduced. This model supports fixed offers and a level adder to the same monthly purchase and sale index. It excludes utility charges, imbalance exposure, credit/collateral financing and overhead unless included in your rates.')
-    st.dataframe(pd.DataFrame(selections,columns=['Hub','Product','Contract']),hide_index=True)
-export=result.reset_index(); export['utility']=utility; export['client_location']=client_location; export['facility_type']=facility_type; export.insert(0,'customer',customer);export.insert(1,'trade_date',pd.Timestamp(asof));export.insert(2,'contract_start_date',str(start_entered));export.insert(3,'term_months',term);export.insert(2,'components',' + '.join(x[2] for x in selections))
-st.download_button('Download monthly economics CSV',export.to_csv(index=False).encode(),'rem_deal_economics.csv','text/csv')
-st.download_button('Download usage schedule CSV',usage.to_csv(index=False).encode(),'customer_usage.csv','text/csv')
+if __name__ == '__main__':
+    try:
+        run_economics_app()
+    except BaseException as exc:
+        if exc.__class__.__name__=='StopException':
+            from app_workflow_help import finish
+            finish(st)
+        raise
+    else:
+        from app_workflow_help import finish
+        finish(st)

@@ -1,0 +1,695 @@
+{
+  "Mercury|Refresh blotter & prices": {
+    "goal": "Refresh blotter & prices: Refresh and verify the source trades before downstream calculations.",
+    "inputs": "Connected workbook, source date, trade-date window and saved register.",
+    "steps": [
+      "Refresh/select the latest workbook and verify its fingerprint.",
+      "Review trade terms, pricing classification and listed exceptions.",
+      "Apply reviewed corrections, then proceed to valuation."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Trade ledger": {
+    "goal": "Trade ledger: Refresh and verify the source trades before downstream calculations.",
+    "inputs": "Connected workbook, source date, trade-date window and saved register.",
+    "steps": [
+      "Refresh/select the latest workbook and verify its fingerprint.",
+      "Review trade terms, pricing classification and listed exceptions.",
+      "Apply reviewed corrections, then proceed to valuation."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Flags": {
+    "goal": "Flags: Refresh and verify the source trades before downstream calculations.",
+    "inputs": "Connected workbook, source date, trade-date window and saved register.",
+    "steps": [
+      "Refresh/select the latest workbook and verify its fingerprint.",
+      "Review trade terms, pricing classification and listed exceptions.",
+      "Apply reviewed corrections, then proceed to valuation."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Forward reconciliation": {
+    "goal": "Forward reconciliation: Refresh and verify the source trades before downstream calculations.",
+    "inputs": "Connected workbook, source date, trade-date window and saved register.",
+    "steps": [
+      "Refresh/select the latest workbook and verify its fingerprint.",
+      "Review trade terms, pricing classification and listed exceptions.",
+      "Apply reviewed corrections, then proceed to valuation."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Parallel deal register": {
+    "goal": "Parallel deal register: Refresh and verify the source trades before downstream calculations.",
+    "inputs": "Connected workbook, source date, trade-date window and saved register.",
+    "steps": [
+      "Refresh/select the latest workbook and verify its fingerprint.",
+      "Review trade terms, pricing classification and listed exceptions.",
+      "Apply reviewed corrections, then proceed to valuation."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|ICE forwards": {
+    "goal": "ICE forwards: Establish complete, correctly mapped reference prices.",
+    "inputs": "Pricing file/date, product mapping and delivery-month range.",
+    "steps": [
+      "Select the pricing source and exact snapshot date.",
+      "Check full product names, delivery range and required reference type.",
+      "Resolve missing/conflicting prices before relying on full totals."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Monthly indexes": {
+    "goal": "Monthly indexes: Establish complete, correctly mapped reference prices.",
+    "inputs": "Pricing file/date, product mapping and delivery-month range.",
+    "steps": [
+      "Select the pricing source and exact snapshot date.",
+      "Check full product names, delivery range and required reference type.",
+      "Resolve missing/conflicting prices before relying on full totals."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Daily price check": {
+    "goal": "Daily price check: Establish complete, correctly mapped reference prices.",
+    "inputs": "Pricing file/date, product mapping and delivery-month range.",
+    "steps": [
+      "Select the pricing source and exact snapshot date.",
+      "Check full product names, delivery range and required reference type.",
+      "Resolve missing/conflicting prices before relying on full totals."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Cash sources": {
+    "goal": "Cash sources: Establish complete, correctly mapped reference prices.",
+    "inputs": "Pricing file/date, product mapping and delivery-month range.",
+    "steps": [
+      "Select the pricing source and exact snapshot date.",
+      "Check full product names, delivery range and required reference type.",
+      "Resolve missing/conflicting prices before relying on full totals."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|WAPP records": {
+    "goal": "WAPP records: Establish complete, correctly mapped reference prices.",
+    "inputs": "Pricing file/date, product mapping and delivery-month range.",
+    "steps": [
+      "Select the pricing source and exact snapshot date.",
+      "Check full product names, delivery range and required reference type.",
+      "Resolve missing/conflicting prices before relying on full totals."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Monthly forwards": {
+    "goal": "Monthly forwards: Review projected valuation or counterparty exposure for the intended scope.",
+    "inputs": "Refreshed trades, classifications, pricing coverage and report filters.",
+    "steps": [
+      "Confirm source freshness and all open-position months.",
+      "Set counterparties, products and pricing filters.",
+      "Review completeness and distinguish MTM from settlement cashflow."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Forward valuation": {
+    "goal": "Forward valuation: Review projected valuation or counterparty exposure for the intended scope.",
+    "inputs": "Refreshed trades, classifications, pricing coverage and report filters.",
+    "steps": [
+      "Confirm source freshness and all open-position months.",
+      "Set counterparties, products and pricing filters.",
+      "Review completeness and distinguish MTM from settlement cashflow."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Counterparty exposure": {
+    "goal": "Counterparty exposure: Review projected valuation or counterparty exposure for the intended scope.",
+    "inputs": "Refreshed trades, classifications, pricing coverage and report filters.",
+    "steps": [
+      "Confirm source freshness and all open-position months.",
+      "Set counterparties, products and pricing filters.",
+      "Review completeness and distinguish MTM from settlement cashflow."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Trade documents": {
+    "goal": "Generate reviewed trade confirmations, invoices or settlement statements from selected physical trades.",
+    "inputs": "Trade-date range first; optional delivery-month filter; counterparty, trade books, classifications and legal names.",
+    "steps": [
+      "Select trade dates and counterparty; leave delivery filtering unchecked unless intended.",
+      "Review effective pricing. Use the visible override form only when needed.",
+      "Prepare/review drafts, then finalize under a new reference.",
+      "Select finalized confirmations for one email; test and review all PDFs before sending."
+    ],
+    "check": "FIXED means an outright price; GDD/INDEX mean index plus the booked differential. Signatures use the entered legal names. TIRCO invoice support belongs in the Riverbend TIRCO invoice workflow."
+  },
+  "Mercury|Cash": {
+    "goal": "Cash: Review documents or reconcile projected charges with actual billing.",
+    "inputs": "Accounting/delivery month, counterparty, trades and invoice/support files.",
+    "steps": [
+      "Select the accounting month and counterparty.",
+      "Review trade quantities, pricing and invoice totals.",
+      "Save reviewed results; issue or send only through its separate review step."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Invoice reconciliation": {
+    "goal": "Invoice reconciliation: Review documents or reconcile projected charges with actual billing.",
+    "inputs": "Accounting/delivery month, counterparty, trades and invoice/support files.",
+    "steps": [
+      "Select the accounting month and counterparty.",
+      "Review trade quantities, pricing and invoice totals.",
+      "Save reviewed results; issue or send only through its separate review step."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Utility remittances": {
+    "goal": "Utility remittances: Review documents or reconcile projected charges with actual billing.",
+    "inputs": "Accounting/delivery month, counterparty, trades and invoice/support files.",
+    "steps": [
+      "Select the accounting month and counterparty.",
+      "Review trade quantities, pricing and invoice totals.",
+      "Save reviewed results; issue or send only through its separate review step."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|DEO remittance": {
+    "goal": "DEO remittance: Review documents or reconcile projected charges with actual billing.",
+    "inputs": "Accounting/delivery month, counterparty, trades and invoice/support files.",
+    "steps": [
+      "Select the accounting month and counterparty.",
+      "Review trade quantities, pricing and invoice totals.",
+      "Save reviewed results; issue or send only through its separate review step."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Customer activity": {
+    "goal": "Customer activity: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Pool molecule balance": {
+    "goal": "Pool molecule balance: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Physical balance": {
+    "goal": "Physical balance: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Weather & Load Forecast": {
+    "goal": "Weather & Load Forecast: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Four-day simulator": {
+    "goal": "Four-day simulator: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Utility targets & analysis": {
+    "goal": "Utility targets & analysis: Compare requirements, forecasts and physical coverage over the chosen dates.",
+    "inputs": "Utility/book, gas-day range, forecast/requirement source and reviewed allocations.",
+    "steps": [
+      "Select utility and date range; confirm source coverage.",
+      "Review forecast/normal or required volumes and allocation/storage choices.",
+      "Resolve gaps, then compare the selected-period results."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Columbia storage": {
+    "goal": "Columbia storage: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|DEO storage": {
+    "goal": "DEO storage: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Panhandle storage": {
+    "goal": "Panhandle storage: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Columbia COH \u2014 Provisional": {
+    "goal": "Columbia COH \u2014 Provisional: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Columbia DEO \u2014 Provisional": {
+    "goal": "Columbia DEO \u2014 Provisional: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Storage pricing & summary": {
+    "goal": "Storage pricing & summary: Review inventory, capacity and an editable storage profile.",
+    "inputs": "Utility, storage month, opening inventory, capacity and confirmed daily limits.",
+    "steps": [
+      "Confirm opening inventory, capacity and the relevant month.",
+      "Edit movements and inspect ending inventory, ratchets and headroom.",
+      "Review remaining constraint flags and explicitly save the plan."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Overview": {
+    "goal": "Overview: Review the current run and retain a traceable report package.",
+    "inputs": "Current calculated run, source dates and chosen report scope.",
+    "steps": [
+      "Confirm sources and reporting range.",
+      "Review incomplete totals and exception reasons.",
+      "Download the needed reports or save the reviewed run archive."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Mercury|Run archive": {
+    "goal": "Run archive: Review the current run and retain a traceable report package.",
+    "inputs": "Current calculated run, source dates and chosen report scope.",
+    "steps": [
+      "Confirm sources and reporting range.",
+      "Review incomplete totals and exception reasons.",
+      "Download the needed reports or save the reviewed run archive."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Workbook updates and reconciliation": {
+    "goal": "Workbook updates and reconciliation: Maintain a complete and reviewed physical trade register.",
+    "inputs": "Saved register/workbook, trade dates, counterparties and pricing terms.",
+    "steps": [
+      "Import or refresh source trades.",
+      "Review additions/changes, classifications and duplicate flags.",
+      "Explicitly save the reviewed register before billing."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Physical trade register": {
+    "goal": "Physical trade register: Maintain a complete and reviewed physical trade register.",
+    "inputs": "Saved register/workbook, trade dates, counterparties and pricing terms.",
+    "steps": [
+      "Import or refresh source trades.",
+      "Review additions/changes, classifications and duplicate flags.",
+      "Explicitly save the reviewed register before billing."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly billing indices": {
+    "goal": "Monthly billing indices: Maintain a complete and reviewed physical trade register.",
+    "inputs": "Saved register/workbook, trade dates, counterparties and pricing terms.",
+    "steps": [
+      "Import or refresh source trades.",
+      "Review additions/changes, classifications and duplicate flags.",
+      "Explicitly save the reviewed register before billing."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly supply": {
+    "goal": "Monthly supply: Maintain a complete and reviewed physical trade register.",
+    "inputs": "Saved register/workbook, trade dates, counterparties and pricing terms.",
+    "steps": [
+      "Import or refresh source trades.",
+      "Review additions/changes, classifications and duplicate flags.",
+      "Explicitly save the reviewed register before billing."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Workbook customer setup": {
+    "goal": "Workbook customer setup: Maintain customer details, contract terms and monthly usage.",
+    "inputs": "Customer, effective month, legal/contact information and usage source.",
+    "steps": [
+      "Select the customer and month/effective dates.",
+      "Enter/review the details or usage and any transport election.",
+      "Save reviewed inputs; confirm they reload before preparing invoices."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Customer profiles": {
+    "goal": "Customer profiles: Maintain customer details, contract terms and monthly usage.",
+    "inputs": "Customer, effective month, legal/contact information and usage source.",
+    "steps": [
+      "Select the customer and month/effective dates.",
+      "Enter/review the details or usage and any transport election.",
+      "Save reviewed inputs; confirm they reload before preparing invoices."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Customer contracts": {
+    "goal": "Customer contracts: Maintain customer details, contract terms and monthly usage.",
+    "inputs": "Customer, effective month, legal/contact information and usage source.",
+    "steps": [
+      "Select the customer and month/effective dates.",
+      "Enter/review the details or usage and any transport election.",
+      "Save reviewed inputs; confirm they reload before preparing invoices."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly customer usage": {
+    "goal": "Monthly customer usage: Maintain customer details, contract terms and monthly usage.",
+    "inputs": "Customer, effective month, legal/contact information and usage source.",
+    "steps": [
+      "Select the customer and month/effective dates.",
+      "Enter/review the details or usage and any transport election.",
+      "Save reviewed inputs; confirm they reload before preparing invoices."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Customer usage history": {
+    "goal": "Customer usage history: Maintain customer details, contract terms and monthly usage.",
+    "inputs": "Customer, effective month, legal/contact information and usage source.",
+    "steps": [
+      "Select the customer and month/effective dates.",
+      "Enter/review the details or usage and any transport election.",
+      "Save reviewed inputs; confirm they reload before preparing invoices."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly billing summary": {
+    "goal": "Monthly billing summary: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Customer invoices": {
+    "goal": "Customer invoices: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Excel billing reconciliation": {
+    "goal": "Excel billing reconciliation: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Invoice archive": {
+    "goal": "Invoice archive: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Issue customer invoice": {
+    "goal": "Issue customer invoice: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Retail invoice distribution": {
+    "goal": "Retail invoice distribution: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly invoice register": {
+    "goal": "Monthly invoice register: Move from reviewed customer usage to draft review, issuance and delivery.",
+    "inputs": "Accounting month, saved usage, prices, customer profiles and billing controls.",
+    "steps": [
+      "Review monthly inputs and prepare/download draft PDFs.",
+      "Reconcile and save reviewed drafts, then issue final invoices.",
+      "Review recipients and final documents before explicit distribution."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP confirmations": {
+    "goal": "ECAP confirmations: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP confirmation archive": {
+    "goal": "ECAP confirmation archive: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP final confirmations": {
+    "goal": "ECAP final confirmations: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP invoice": {
+    "goal": "ECAP invoice: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP draft archive": {
+    "goal": "ECAP draft archive: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP invoice issuance": {
+    "goal": "ECAP invoice issuance: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|ECAP document reconciliation": {
+    "goal": "ECAP document reconciliation: Prepare and review ECAP confirmations or invoices.",
+    "inputs": "Counterparty/trades, delivery dates, final settlement availability and client details.",
+    "steps": [
+      "Select the required trade/document window and verify pricing terms.",
+      "Prepare and review the draft, then save/issue the correct final document.",
+      "Review the final email package or record delivery separately."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|TIRCO billing and P&L": {
+    "goal": "TIRCO billing and P&L: Review TIRCO billing and distribute the final invoice with support.",
+    "inputs": "Accounting month, billed energy, publication prices, charges and final invoice details.",
+    "steps": [
+      "Review the billing worksheet, exceedance rules and draft invoice.",
+      "Issue and save the reviewed final invoice.",
+      "In TIRCO invoice email, upload support, test to self and review before sending."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|TIRCO invoice issuance": {
+    "goal": "TIRCO invoice issuance: Review TIRCO billing and distribute the final invoice with support.",
+    "inputs": "Accounting month, billed energy, publication prices, charges and final invoice details.",
+    "steps": [
+      "Review the billing worksheet, exceedance rules and draft invoice.",
+      "Issue and save the reviewed final invoice.",
+      "In TIRCO invoice email, upload support, test to self and review before sending."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|All issued invoices": {
+    "goal": "All issued invoices: Reconcile issued invoices, receipts and outstanding balances.",
+    "inputs": "Customer/counterparty, accounting period, actual invoice/receipt evidence.",
+    "steps": [
+      "Select the period and account.",
+      "Compare issued amounts, recorded payments and supporting originals.",
+      "Save reviewed actuals; investigate differences before marking reconciled."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Payments and balances": {
+    "goal": "Payments and balances: Reconcile issued invoices, receipts and outstanding balances.",
+    "inputs": "Customer/counterparty, accounting period, actual invoice/receipt evidence.",
+    "steps": [
+      "Select the period and account.",
+      "Compare issued amounts, recorded payments and supporting originals.",
+      "Save reviewed actuals; investigate differences before marking reconciled."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Receivables aging": {
+    "goal": "Receivables aging: Reconcile issued invoices, receipts and outstanding balances.",
+    "inputs": "Customer/counterparty, accounting period, actual invoice/receipt evidence.",
+    "steps": [
+      "Select the period and account.",
+      "Compare issued amounts, recorded payments and supporting originals.",
+      "Save reviewed actuals; investigate differences before marking reconciled."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Monthly P&L reconciliation": {
+    "goal": "Monthly P&L reconciliation: Reconcile issued invoices, receipts and outstanding balances.",
+    "inputs": "Customer/counterparty, accounting period, actual invoice/receipt evidence.",
+    "steps": [
+      "Select the period and account.",
+      "Compare issued amounts, recorded payments and supporting originals.",
+      "Save reviewed actuals; investigate differences before marking reconciled."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Asset-management clients": {
+    "goal": "Asset-management clients: Maintain shared settings and resolve workflow actions.",
+    "inputs": "Saved register, relevant month, client settings or verified send outcomes.",
+    "steps": [
+      "Select the administrative task and accounting month.",
+      "Review the current settings, evidence and affected documents.",
+      "Apply the explicit save/resolve action and verify the resulting status."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Review queue": {
+    "goal": "Review queue: Maintain shared settings and resolve workflow actions.",
+    "inputs": "Saved register, relevant month, client settings or verified send outcomes.",
+    "steps": [
+      "Select the administrative task and accounting month.",
+      "Review the current settings, evidence and affected documents.",
+      "Apply the explicit save/resolve action and verify the resulting status."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Email distribution": {
+    "goal": "Email distribution: Maintain shared settings and resolve workflow actions.",
+    "inputs": "Saved register, relevant month, client settings or verified send outcomes.",
+    "steps": [
+      "Select the administrative task and accounting month.",
+      "Review the current settings, evidence and affected documents.",
+      "Apply the explicit save/resolve action and verify the resulting status."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Riverbend|Storage maintenance": {
+    "goal": "Storage maintenance: Maintain shared settings and resolve workflow actions.",
+    "inputs": "Saved register, relevant month, client settings or verified send outcomes.",
+    "steps": [
+      "Select the administrative task and accounting month.",
+      "Review the current settings, evidence and affected documents.",
+      "Apply the explicit save/resolve action and verify the resulting status."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  },
+  "Texas economics": {
+    "goal": "Build a customer offer, compare it with the existing contract and save a reusable workstream.",
+    "inputs": "Customer/utility, pricing file and date, start/term, monthly volumes, supply components, transport, margin and current contract terms.",
+    "steps": [
+      "Open a saved workstream or enter customer and pricing sources.",
+      "Verify monthly volumes and all supply/transport/capital assumptions.",
+      "Review the offer, estimated savings and sensitivity results.",
+      "Save the workstream; download the client proposal or all reports."
+    ],
+    "check": "Confirm all monthly volumes, units and the exact pricing snapshot. Boltex uses the supplied calendar-month profile. Save confirmation should show expected total MMBtu and month count. The client PDF excludes internal margin and credit calculations."
+  },
+  "Ohio economics": {
+    "goal": "Build and compare a DEO or Columbia acquisition campaign, then save the reviewed assumptions.",
+    "inputs": "Utility, customer count/mix, weather-normal or manual schedules, pricing file/date, transport/storage and actual offers.",
+    "steps": [
+      "Open a saved Ohio workstream and choose the utility/source file.",
+      "Review customer mix, monthly load and storage schedule.",
+      "Compare model/actual offer economics, competition and missing-price treatment.",
+      "Save the campaign and download the summary or all reports."
+    ],
+    "check": "Ohio usage/offer units remain Mcf and quoted price units as disclosed by the app. Verify storage transfers, taxes, costs and any curve extension before publishing. New inputs must be saved explicitly."
+  },
+  "Mercury|Monthly settlement capture": {
+    "goal": "Capture the required dated monthly billing reference and retain its source.",
+    "inputs": "Delivery month, required pricing date, exact ICE file and billing-index values.",
+    "steps": [
+      "Select the settlement delivery month.",
+      "Verify the required dated file and missing/conflicting index checks.",
+      "Review and save the billing snapshot, then return to pricing or invoices."
+    ],
+    "check": "Use the required business-day convention and actual file date; never substitute an arbitrary newer curve."
+  },
+  "Mercury|DEO remittance reconciliation": {
+    "goal": "DEO remittance: Review documents or reconcile projected charges with actual billing.",
+    "inputs": "Accounting/delivery month, counterparty, trades and invoice/support files.",
+    "steps": [
+      "Select the accounting month and counterparty.",
+      "Review trade quantities, pricing and invoice totals.",
+      "Save reviewed results; issue or send only through its separate review step."
+    ],
+    "check": "Confirm the customer/counterparty, date window, units and source version. Incomplete values and display zeros must not be treated as verified results."
+  }
+}

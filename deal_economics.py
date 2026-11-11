@@ -172,7 +172,7 @@ def client_savings_comparison(result, current_mode, current_rate, current_transp
 
 
 def build_client_proposal_pdf(meta, comparison):
-    """Client-safe branded one-pager; all prices and savings use calculated inputs."""
+    """Client-safe selected offer plus optional fixed/index term worksheets."""
     from io import BytesIO
     from pathlib import Path
     from xml.sax.saxutils import escape
@@ -283,10 +283,17 @@ def build_client_proposal_pdf(meta, comparison):
         title='Natural Gas Offer and Savings Comparison',author='Riverbend Gas Marketing')
     frame=Frame(36,52,540,710,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0,id='ClientOfferCentered')
     doc.addPageTemplates(PageTemplate(id='ClientOfferPage',frames=[frame],onPage=footer))
-    doc.build([header,Spacer(1,18)]+(body if body_height<=562 else [KeepInFrame(540,562,body,mode='shrink',hAlign='CENTER',vAlign='TOP')]))
+    story=[header,Spacer(1,18)]+(body if body_height<=562 else [KeepInFrame(540,562,body,mode='shrink',hAlign='CENTER',vAlign='TOP')])
+    if meta.get('term_worksheets'):
+        from client_term_proposal import pages as client_term_pages
+        story.extend(client_term_pages(meta,styles,get_logo_bytes()))
+    doc.build(story)
     return out.getvalue()
 
 def build_summary_pdf(meta, summary, result, scenarios):
+    if meta.get('internal_term_worksheets'):
+        from internal_opportunity_proposal import build
+        return build(meta,summary,result,scenarios,get_logo_bytes())
     from io import BytesIO
     from xml.sax.saxutils import escape
     from reportlab.lib import colors
@@ -868,17 +875,23 @@ def run_economics_app():
     scenario_table=pd.DataFrame(scenario_rows)
     with pdf_panel:
         try:
-            pdf_bytes=build_summary_pdf(dict(**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
-            st.download_button('Download professional deal summary (PDF)',pdf_bytes,'REM_Deal_Summary.pdf','application/pdf')
+            from client_term_proposal import schedules as opportunity_term_schedules
+            internal_terms=opportunity_term_schedules(standard_offers,
+                (prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery),
+                pricing_mode,offers,deal_options,internal=True,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+            internal_term_export=pd.DataFrame([dict(pricing_structure=structure,**row) for structure,worksheet in internal_terms.items() for row in worksheet['rows']])
+            st.download_button('Download internal fixed and index term worksheets (CSV)',internal_term_export.to_csv(index=False).encode(),'Internal_Opportunity_Terms.csv','text/csv')
+            pdf_bytes=build_summary_pdf(dict(internal_term_worksheets=internal_terms,client_index_name=client_index_name,**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
+            st.download_button('Download internal opportunity package - three pages (PDF)',pdf_bytes,'Riverbend_Internal_Opportunity.pdf','application/pdf')
         except ImportError:
             st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
     
-    st.subheader('Client proposal and savings comparison')
+    st.subheader('Client proposal and term worksheets')
     if current_rate is None:
-        st.info('Enter the existing contract rate in "Client proposal - existing contract and savings inputs" to generate the client one-pager.')
+        st.info('Enter the existing contract rate in "Client proposal - existing contract and savings inputs" to generate the three-page client proposal.')
     else:
         try:
-            if (is_indexed or current_mode=='Index + adder') and not client_index_name.strip():raise ValueError('Enter a customer-facing index name.')
+            if not client_index_name.strip():raise ValueError('Enter a customer-facing index name.')
             if different_index and not existing_index_name.strip():raise ValueError('Enter the existing index name.')
             client_monthly,client_comparison=client_savings_comparison(result,current_mode,current_rate,current_transport,current_index)
             proposed_offer=float(result.offer_rate.iloc[0])
@@ -898,8 +911,20 @@ def run_economics_app():
             st.dataframe(client_export,hide_index=False)
             st.download_button('Download client savings schedule (CSV)',client_export.reset_index().to_csv(index=False).encode(),'Client_Savings_Comparison.csv','text/csv')
             try:
+                from client_term_proposal import schedules as client_term_schedules
+                proposal_terms=client_term_schedules(standard_offers,
+                    (prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery),
+                    pricing_mode,offers,deal_options,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+                client_meta.update(term_worksheets=proposal_terms,client_index_name=client_index_name)
+                st.caption('The three-page proposal retains the selected offer on page 1. Pages 2 and 3 show 12, 18, 24, 36 and 48 months. The active pricing structure uses its reviewed term offers; the alternative structure uses model targets under the same assumptions. Transportation follows the current pass-through setting on all pages.')
+                with st.expander('Review fixed and index offers for client distribution'):
+                    for structure,worksheet in proposal_terms.items():
+                        st.write(structure+' — '+worksheet['basis'])
+                        st.dataframe(pd.DataFrame(worksheet['rows']),hide_index=True,use_container_width=True)
+                client_term_export=pd.DataFrame([dict(pricing_structure=structure,**row) for structure,worksheet in proposal_terms.items() for row in worksheet['rows']])
+                st.download_button('Download client term worksheets (CSV)',client_term_export.to_csv(index=False).encode(),'Client_Term_Worksheets.csv','text/csv')
                 client_pdf=build_client_proposal_pdf(client_meta,client_comparison)
-                st.download_button('Download client offer and savings one-pager (PDF)',client_pdf,'Riverbend_Client_Offer.pdf','application/pdf')
+                st.download_button('Download three-page client proposal (PDF)',client_pdf,'Riverbend_Client_Proposal.pdf','application/pdf')
             except ImportError:st.info('Add reportlab to requirements.txt to enable the client proposal PDF.')
         except ValueError as e:st.info('Client comparison: '+str(e))
     

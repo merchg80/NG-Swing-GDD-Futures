@@ -443,6 +443,9 @@ if '_pricing_carry' in st.session_state:
 if '_pending_workstream' in st.session_state:
     pending=st.session_state.pop('_pending_workstream')
     st.session_state.pop('_current_snapshot',None)
+    st.session_state.pop('_pricing_carry',None)
+    st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
+    st.session_state.pop('_workstream_save_request',None)
     for k in list(st.session_state):
         if k.startswith(('wk_','offer_mode_','offer_override_','usage_')):del st.session_state[k]
     for k,v in pending.get('widgets',{}).items():
@@ -460,12 +463,17 @@ if '_pending_workstream' in st.session_state:
     st.session_state['ws_name']=pending['name']
 
 def save_current_workstream(copy=False):
+    # Streamlit callbacks run before the editor is materialized on this run.
+    # Queue the action; write only after rebuilding the current input snapshot.
+    st.session_state['_workstream_save_request']={'copy':bool(copy)}
+
+def persist_current_workstream(copy=False):
     try:
         snapshot=st.session_state.get('_current_snapshot')
         if not snapshot:raise WorkstreamError('Load pricing and enter deal assumptions before saving.')
         path,sha,payload=save_workstream(ws_repo,ws_token,st.session_state.get('ws_name',''),snapshot,ws_branch,None if copy else st.session_state.get('_ws_path'),None if copy else st.session_state.get('_ws_sha'))
         st.session_state['_ws_path']=path;st.session_state['_ws_sha']=sha
-        st.session_state['_saved_message']='Saved '+payload['name']+' at '+payload['saved_at']
+        st.session_state['_saved_message']='Saved '+payload['name']+' at '+payload['saved_at']+' | '+f"{sum(float(r['usage_mmbtu']) for r in payload.get('usage',[])):,.0f} MMBtu across {len(payload.get('usage',[]))} months"
         st.session_state['_last_saved_snapshot']=snapshot
     except Exception as e:st.session_state['_save_error']=str(e)
 
@@ -641,12 +649,24 @@ financing_days=cap2.number_input('Days of costs financed',min_value=0.,value=30.
 st.caption('Capital charge per delivered MMBtu = positive supply + transport + brokerage cost per MMBtu × annual hurdle × financing days ÷ 365. The charge is included in the target offer and break-even price, and deducted from modeled profit. Financing days represent the cash collection gap. Negative total costs have a zero capital base.')
 months=pd.date_range(start,periods=term,freq='MS')
 base=pd.DataFrame({'month':months,'usage_mmbtu':[defaults['usage'].get(m.month,0.) for m in months]})
+from boltex_usage import seed as seed_boltex_usage,is_boltex
+base=seed_boltex_usage(base,customer)
 if st.session_state.get('_restored_usage'):
     saved_usage={pd.Timestamp(row['month']):float(row['usage_mmbtu']) for row in st.session_state['_restored_usage']}
     base['usage_mmbtu']=[saved_usage.get(m,v) for m,v in zip(base.month,base.usage_mmbtu)]
+if is_boltex(customer) and not st.session_state.get('wk_boltex_profile_applied'):
+    # Owner supplied this profile to replace the old/default Boltex schedule once.
+    base=seed_boltex_usage(base,customer)
+    st.session_state['_restored_usage']=[dict(month=str(pd.Timestamp(r.month).date()),usage_mmbtu=float(r.usage_mmbtu)) for r in base.itertuples(index=False)]
+    st.session_state['wk_boltex_profile_applied']=True
+    st.session_state['_usage_editor_revision']=st.session_state.get('_usage_editor_revision',0)+1
 st.subheader('Customer monthly usage')
-st.caption('Enter total delivered MMBtu for each month. The attached workbook starts at 1,700 MMBtu/month. Values are estimates, not daily quantities.')
-usage_file=st.file_uploader('Load a saved usage schedule (optional)',type=['csv'])
+if is_boltex(customer):
+    st.caption('Boltex profile: supplied monthly history, September 2025–August 2026; repeated by calendar month for the contract period. August uses 8,246 from August 2026. Values are used unchanged in the monthly usage units; review any unit conversion separately. Saved edits take precedence after the initial profile load.')
+else:
+    st.caption('Enter total delivered MMBtu for each month. The attached workbook starts at 1,700 MMBtu/month. Values are estimates, not daily quantities.')
+usage_revision=st.session_state.get('_usage_editor_revision',0)
+usage_file=st.file_uploader('Load a saved usage schedule (optional)',type=['csv'],key=f'usage_upload_{usage_revision}')
 if usage_file is not None:
     try:
         loaded=pd.read_csv(usage_file)
@@ -655,7 +675,7 @@ if usage_file is not None:
         base['usage_mmbtu']=base.month.map(loaded.set_index('month')['usage_mmbtu'])
         if base.usage_mmbtu.isna().any(): raise ValueError('Schedule must cover every selected month')
     except Exception as e: st.error(f'Invalid usage schedule: {e}');st.stop()
-usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True,format='localized')},key=f'usage_{start}_{term}',use_container_width=True)
+usage=st.data_editor(base,hide_index=True,disabled=['month'],column_config={'usage_mmbtu':st.column_config.NumberColumn('Usage (MMBtu/month)',min_value=0.,required=True,format='localized')},key=f'usage_{start}_{term}_{usage_revision}',use_container_width=True)
 with st.expander('Upfront credit and investment returns',expanded=True):
     a,b,c=st.columns(3)
     discount=a.number_input('Required annual discount rate (%)',key='wk_discount',min_value=0.,value=10.,step=.5,format='%.2f')/100
@@ -762,7 +782,12 @@ for k,v in st.session_state.items():
 current_usage=[dict(month=str(pd.Timestamp(row.month).date()),usage_mmbtu=float(row.usage_mmbtu)) for row in usage.itertuples(index=False)]
 snapshot=dict(pricing_structure=deal_options,credit_sizing_mode=credit_mode,calculated_credit=credit_parts,credit_posted=investment,schema_version=1,widgets=widget_snapshot,usage=current_usage,pricing_file=str(selected_path.relative_to(INPUT_DIR)),trade_date=str(pd.Timestamp(asof).date()),latest_pricing=False,name=st.session_state.get('ws_name',''))
 st.session_state['_current_snapshot']=snapshot
+st.session_state['_restored_usage']=current_usage
 st.session_state.pop('_pricing_carry',None)
+request=st.session_state.pop('_workstream_save_request',None)
+if request is not None:
+    persist_current_workstream(request['copy'])
+    st.rerun()
 with summary_panel:
     st.download_button('Download workstream backup (JSON)',json.dumps(snapshot,indent=2,allow_nan=False).encode(),'REM_Workstream.json','application/json')
 try:

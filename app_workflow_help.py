@@ -38,12 +38,15 @@ def actor(st):
 
 
 def begin(st,app):
+    st.session_state['_workflow_footer_active']=False
     access(st)
     from risk_report_downloads import begin as reports_begin
     st.session_state['_workflow_app']=app
-    st.session_state['_workflow_tutorial_panel']=st.container(border=True)
+    st.session_state['_workflow_footer_active']=True
+    # Collect context now; allocate UI only after the page body has rendered.
+    st.session_state.pop('_workflow_tutorial_panel',None)
+    st.session_state.pop('_workflow_help_panel',None)
     reports_begin(st)
-    st.session_state['_workflow_help_panel']=st.container(border=True)
 
 
 def context(st):
@@ -93,7 +96,7 @@ def source_excerpt(app,page):
             chunk=ast.get_source_segment(text,node) or ''
             if size+len(chunk)>14000:continue
             parts.append(chunk);size+=len(chunk)
-    return dict(file=file,functions=parts,note='Only listed functions are included. To offer a downloadable code update, return each changed function as one complete replacement in a ```python block, retaining its exact name and signature and omitting decorators/top-level imports. Do not include illustrative Python blocks. Do not invent code outside the supplied context.')
+    return dict(file=file,functions=parts,note='Only listed functions are included; do not invent code outside the supplied context.')
 
 
 def ask_ai(settings,payload):
@@ -144,8 +147,10 @@ def task_navigation(st,app):
 
 
 def finish(st):
+    if not st.session_state.get('_workflow_footer_active',False):return
+    st.session_state['_workflow_footer_active']=False
     app,page=context(st);guide=guide_for(app,page)
-    panel=st.session_state.get('_workflow_tutorial_panel')
+    panel=st.container(border=True)
     if panel is not None:
         with panel:
             st.subheader(page+' — start here')
@@ -158,8 +163,7 @@ def finish(st):
                 st.caption('Save, Issue and Send are separate actions. Downloads preserve the current report; they do not change the trade or payment register.')
     from risk_report_downloads import finish as reports_finish
     reports_finish(st)
-    panel=st.session_state.get('_workflow_help_panel')
-    if panel is None:return
+    panel=st.container(border=True)
     # Calls in this panel use the original button so help artifacts do not become business reports.
     original=st._risk_original_download_button
     with panel:
@@ -198,18 +202,3 @@ def finish(st):
             answer=st.session_state.get('helper_answer_'+scope)
             if answer and answer[0]==identity:
                 st.markdown(answer[1]);st.caption('AI guidance is a proposal. Review it against the report and source code before applying any change.')
-                if code_help:
-                    approved=st.checkbox('I reviewed the proposed function changes and want a ZIP for manual GitHub upload',key='helper_zip_review_'+scope+'_'+identity[:12])
-                    if st.button('Build proposed Python update ZIP',disabled=not approved,key='helper_build_zip_'+scope+'_'+identity[:12]):
-                        st.session_state.pop('helper_code_zip_'+scope,None)
-                        try:
-                            from app_code_update_zip import build
-                            package,manifest=build(answer[1],request_context['python_context'],Path(__file__).parent)
-                            st.session_state['helper_code_zip_'+scope]=(identity,package,manifest)
-                        except (ValueError,SyntaxError) as exc:st.error('Code ZIP not built: '+str(exc))
-                    prepared=st.session_state.get('helper_code_zip_'+scope)
-                    if prepared and prepared[0]==identity:
-                        st.write('Proposed functions: '+', '.join(prepared[2]['functions']))
-                        st.caption('Scope, signature and syntax checks passed. Runtime behavior has not been tested. Upload manually to a test branch first.')
-                        original('Download proposed Python update ZIP',prepared[1],'proposed_python_update.zip','application/zip',key='helper_code_zip_download_'+scope)
-

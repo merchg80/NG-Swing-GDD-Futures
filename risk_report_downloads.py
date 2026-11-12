@@ -46,7 +46,8 @@ def begin(st):
     original=getattr(st,'_risk_original_download_button',st.download_button)
     st._risk_original_download_button=original
     st.session_state['_risk_page_reports']={}
-    st.session_state['_risk_report_panel']=st.container(border=True)
+    st.session_state['_risk_report_footer_active']=True
+    st.session_state.pop('_risk_report_panel',None)
     def download(label,data=None,file_name=None,mime=None,*args,**kwargs):
         registry=st.session_state.get('_risk_page_reports')
         if registry is not None:collect(registry,label,data,file_name,mime)
@@ -55,8 +56,9 @@ def begin(st):
 
 
 def finish(st):
-    panel=st.session_state.get('_risk_report_panel')
-    if panel is None:return
+    if not st.session_state.get('_risk_report_footer_active',False):return
+    st.session_state['_risk_report_footer_active']=False
+    panel=st.container(border=True)
     reports=list(st.session_state.get('_risk_page_reports',{}).values())
     original=st._risk_original_download_button
     with panel:

@@ -1,7 +1,8 @@
-"""Confidential three-page Texas opportunity package; never used by client renderer."""
+"""Confidential fixed/regional/NYMEX opportunity package; separate client renderer."""
 from io import BytesIO
 from xml.sax.saxutils import escape
 import pandas as pd
+from nymex_reference import INDEXED_MODES
 
 
 def build(meta,summary,result,scenarios,logo_bytes):
@@ -43,7 +44,7 @@ def build(meta,summary,result,scenarios,logo_bytes):
     cards=[]
     for label,value in [('ANNUALIZED PROFIT',money(annual)),('CONTRACT PROFIT',money(profit)),('NET PRESENT VALUE',money(summary['npv']))]:cards.append([p(label,'bold'),Spacer(1,4),p(value,'money')])
     story += [table([cards],[180]*3),Spacer(1,12)]
-    indexed=meta.get('pricing_mode')=='Index + adder'
+    indexed=meta.get('pricing_mode') in INDEXED_MODES
     rows=[['Selected offer / adder',rate(meta['customer_offer_rate']),'Projected all-in price',rate(summary['contract_price'])],['Contract usage',f"{summary['volume']:,.0f} MMBtu",'Spread after capital',rate(summary['spread'])],['Gross margin after capital',percent(summary['gross_margin']),'Break-even adder' if indexed else 'Break-even offer',rate(meta['break_even'])],['Upfront credit',money(meta['investment']),'Terminal recovery',money(meta['recovery'])]]
     story += [table([[p(v,'bold' if j%2==0 else 'body') for j,v in enumerate(r)] for r in rows],[150,120,150,120]),Spacer(1,12),p('Selected-term offer scenarios','bold'),Spacer(1,5)]
     scenario_table=[[p(h,'white') for h in ['Scenario','Quote / adder','Spread','Annual profit','Contract profit','NPV']]]
@@ -54,13 +55,15 @@ def build(meta,summary,result,scenarios,logo_bytes):
     assumptions=[['Transport',rate(meta['transport']),'Brokerage',rate(meta['broker'])],['Target spread',rate(meta['margin']),'Supply fuel',percent(meta['fuel'])],['Capital hurdle',percent(meta['capital_hurdle']),'Financing days',f"{meta['days']:g}"],['Annual NPV discount',percent(meta['discount']),'Credit sizing',meta.get('credit_mode','Manual')],['Transportation recovery','Full pass-through' if meta.get('transport_pass_through') else 'Included in quote','Supplier premium',rate(meta.get('supplier_premium',0))]]
     story += [table([[p(v,'small') for v in r] for r in assumptions],[150,120,150,120],pad=5),Spacer(1,10),p('Sources: '+meta['source'],'small'),p('Market components: '+meta['components'],'small'),Spacer(1,5),p('Profit is after modeled supply, transportation, brokerage and capital charges; overhead and taxes are excluded. NPV uses monthly cash flows, upfront credit and final recovery. Index revenue and profit remain projections.','small')]
     metrics=[('Quoted fixed rate','offer_price',rate),('Projected all-in rate','projected_all_in_price',rate),('Break-even rate / adder','break_even',rate),('Spread after capital','spread',rate),('Gross margin after capital','gross_margin',percent),('Contract usage (MMBtu)','contract_volume',lambda v:f'{v:,.0f}' if pd.notna(v) else 'Unavailable'),('Annualized revenue','annual_revenue',money),('Annualized profit','annualized_profit',money),('Contract profit','contract_profit',money),(f"NPV @ {meta['discount']:.2%}",'npv',money),('Upfront credit posted','upfront_credit',money),('FT credit component','ft_credit',money),('Supply credit component','supply_credit',money),('Terminal credit recovery','credit_recovery',money)]
-    for mode,title in [('Fixed price','Fixed-price opportunity terms'),('Index + adder','Index-adder opportunity terms')]:
+    for mode,title in [('Fixed price','Fixed-price opportunity terms'),('Index + adder','Regional index-adder opportunity terms'),('NYMEX + adder','NYMEX-adder opportunity terms')]:
         data=meta['internal_term_worksheets'][mode];rows=data['rows']
         story += [PageBreak()]+brand(title)+[identity(),Spacer(1,8),p('Pricing as of '+meta['asof']+' | Delivery starts '+meta['start']),Spacer(1,4),p(data['basis'],'small'),Spacer(1,12)]
-        if mode=='Index + adder':story += [p('Monthly index: '+meta.get('client_index_name','Selected monthly index'),'bold'),Spacer(1,8)]
+        if mode in INDEXED_MODES:
+            name='Henry Hub NYMEX (H)' if mode=='NYMEX + adder' else meta.get('regional_index_name',meta.get('client_index_name','Selected monthly index'))
+            story += [p('Monthly index: '+name,'bold'),Spacer(1,8)]
         matrix=[[p('ECONOMICS','white')]+[p(f"{r['term_months']} months",'white') for r in rows]]
         for label,key,fmt in metrics:
-            if key=='offer_price' and mode=='Index + adder':label='Quoted index adder'
+            if key=='offer_price' and mode in INDEXED_MODES:label='Quoted NYMEX adder' if mode=='NYMEX + adder' else 'Quoted index adder'
             cells=[p(label,'bold')]
             for r in rows:
                 value=r.get(key)
@@ -70,7 +73,7 @@ def build(meta,summary,result,scenarios,logo_bytes):
             matrix.append(cells)
         ends=[p('Delivery ends','bold')]+[p((pd.Timestamp(meta['start']).to_period('M')+int(r['term_months'])-1).end_time.strftime('%b %d, %Y'),'small') for r in rows]
         matrix.append(ends)
-        story += [table(matrix,[150]+[78]*5,True,8),Spacer(1,14),p('Calculation and decision basis','bold'),Spacer(1,5),p('All five terms use the same start date, selected pricing curves and operating assumptions. Exact entered usage is used first; longer terms repeat calendar-month usage estimates. Annualized profit equals contract profit x 12 / term months. NPV and credit are calculated separately for each term. FT/supply components show model sizing; posted credit follows the manual/automatic election. Missing terms are withheld.','small'),Spacer(1,8),p('Transportation: '+('additional full-cost pass-through' if meta.get('transport_pass_through') else 'included in quote')+'. '+('Index adders apply above the monthly index; all-in rates are forward estimates, not fixed quotes.' if mode=='Index + adder' else 'Fixed rates shown are the quoted rate under the indicated transportation treatment.'),'small')]
+        story += [table(matrix,[150]+[78]*5,True,8),Spacer(1,14),p('Calculation and decision basis','bold'),Spacer(1,5),p('All five terms use the same start date, selected pricing curves and operating assumptions. Exact entered usage is used first; longer terms repeat calendar-month usage estimates. Annualized profit equals contract profit x 12 / term months. NPV and credit are calculated separately for each term. FT/supply components show model sizing; posted credit follows the manual/automatic election. Missing terms are withheld.','small'),Spacer(1,8),p('Transportation: '+('additional full-cost pass-through' if meta.get('transport_pass_through') else 'included in quote')+'. '+('Index adders apply above the monthly index; all-in rates are forward estimates, not fixed quotes.' if mode in INDEXED_MODES else 'Fixed rates shown are the quoted rate under the indicated transportation treatment.'),'small')]
     out=BytesIO()
     def footer(c,doc):
         c.setFillColor(green);c.rect(0,782,612,10,fill=1,stroke=0);c.setStrokeColor(line);c.line(36,44,576,44)
@@ -80,3 +83,4 @@ def build(meta,summary,result,scenarios,logo_bytes):
     doc.addPageTemplates(PageTemplate(id='InternalOpportunity',frames=[Frame(36,52,540,710,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)],onPage=footer))
     doc.build(story)
     return out.getvalue()
+

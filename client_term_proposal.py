@@ -1,6 +1,7 @@
 """Customer-facing Texas fixed/index term worksheets. Internal returns stay private."""
 import math
 import pandas as pd
+from nymex_reference import MODES,INDEXED_MODES
 
 TERMS=(12,18,24,36,48)
 
@@ -8,7 +9,7 @@ TERMS=(12,18,24,36,48)
 def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,**credit_options):
     """Retain reviewed quotes for active structure; other structure uses model targets."""
     out={}
-    for mode in ('Fixed price','Index + adder'):
+    for mode in MODES:
         if mode==active_mode:
             frame=active_offers.copy()
             basis='Uses the reviewed standard-term offers in the app.'
@@ -35,7 +36,7 @@ def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=Fa
 
 
 def pages(meta,styles,logo_bytes):
-    """Return two explicitly separated portrait worksheets using summary typography."""
+    """Return fixed, regional-index and NYMEX worksheets using summary typography."""
     from io import BytesIO
     from xml.sax.saxutils import escape
     from reportlab.lib import colors
@@ -50,7 +51,7 @@ def pages(meta,styles,logo_bytes):
         else:cmds += [('BACKGROUND',(0,0),(-1,-1),pale)]
         t.setStyle(TableStyle(cmds));return t
     out=[]
-    for mode,title in [('Fixed price','Fixed-price options'),('Index + adder','Index-adder options')]:
+    for mode,title in [('Fixed price','Fixed-price options'),('Index + adder','Regional index-adder options'),('NYMEX + adder','NYMEX-adder options')]:
         data=meta['term_worksheets'][mode]
         out.append(PageBreak())
         logo=Image(BytesIO(logo_bytes),width=250,height=250*402/2096);logo.hAlign='CENTER'
@@ -58,10 +59,11 @@ def pages(meta,styles,logo_bytes):
         customer=p(meta['customer'],'centerbold')
         info=p((meta.get('utility') or 'Utility not specified')+'\n'+(meta.get('client_location') or 'Location not specified'))
         out.extend([table([[customer,info]],[270,270]),Spacer(1,15)])
-        indexed=mode=='Index + adder'
+        indexed=mode in INDEXED_MODES
         if indexed:
-            out.extend([p('Monthly index: '+meta.get('client_index_name','Selected monthly index'),'centerbold'),Spacer(1,7)])
-        headers=['TERM','DELIVERY PERIOD','INDEX ADDER\n$/MMBtu' if indexed else 'FIXED RATE\n$/MMBtu','PROJECTED ALL-IN\n$/MMBtu' if indexed else 'DELIVERED RATE\n$/MMBtu','CONTRACT USAGE\nMMBtu']
+            name='Henry Hub NYMEX (H)' if mode=='NYMEX + adder' else meta.get('regional_index_name',meta.get('client_index_name','Selected monthly index'))
+            out.extend([p('Monthly index: '+name,'centerbold'),Spacer(1,7)])
+        headers=['TERM','DELIVERY PERIOD','NYMEX ADDER\n$/MMBtu' if mode=='NYMEX + adder' else 'INDEX ADDER\n$/MMBtu' if indexed else 'FIXED RATE\n$/MMBtu','PROJECTED ALL-IN\n$/MMBtu' if indexed else 'DELIVERED RATE\n$/MMBtu','CONTRACT USAGE\nMMBtu']
         rows=[[p(h,'white') for h in headers]]
         for r in data['rows']:
             months=int(r['term_months']);start=pd.Timestamp(meta['start']);end=(start.to_period('M')+months-1).end_time
@@ -77,3 +79,4 @@ def pages(meta,styles,logo_bytes):
         note+=' Exact entered usage is used where available; longer terms repeat calendar-month usage assumptions. Utility distribution charges, taxes and other fees are excluded unless expressly included. Unavailable terms require complete pricing before quoting.'
         out.extend([p('Offer basis','bold'),Spacer(1,5),p(note,'small'),Spacer(1,12),p(f"Pricing as of {meta['asof']} | Offer due: {meta.get('due_date') or 'Not specified'}",'small'),p('Subject to final agreement and credit approval.','small')])
     return out
+

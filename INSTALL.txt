@@ -1,0 +1,33 @@
+AI HELP, HOW-TO/TUTORIAL AND REPORTING — BOTTOM-OF-PAGE UPDATE
+
+Install the SAME TWO Python files into BOTH repositories:
+  merchg80/riverbend-risk
+  merchg80/NG-Swing-GDD-Futures
+
+1. Extract this ZIP.
+2. In each repository, upload app_workflow_help.py and risk_report_downloads.py
+   to the repository root, replacing the matching existing files.
+3. Commit the changes. Reload/reboot each deployed Streamlit app if needed.
+4. Check Mercury/Riverbend and Texas/Ohio economics. Working page content now
+   precedes the tutorial/how-to, Reports and downloads, and AI help sections.
+
+This is the complete set of files changed for this layout update. It does not
+replace streamlit_app.py, deal_economics.py, ohio_economics.py, pricing, trade
+workbooks, storage profiles or the P&L reconciliation modules. Keep all other
+files already in your repositories. No secrets/settings changes are required.
+
+The shared begin hook still performs access checks and starts collecting prepared
+reports. It no longer reserves any top-of-page panels. Existing end-of-page
+finish hooks create the panels after page content. All pages/profiles using
+these shared hooks inherit the change, including Riverbend and Mercury subpages,
+Enterprise Model, Texas and Ohio economics. Page-specific native download buttons
+remain beside their outputs; the shared report chooser/ZIP panel moves down.
+
+Tutorial content, task navigation, AI CSV review/consent, single/all report
+choices and original report files are retained. Empty pages get the bottom
+no-reports message. Rendering the footer does not run other pages or trigger AI.
+
+Local tests passed across Mercury/Riverbend/Texas/Ohio contexts, report registry
+reset between reruns, empty-page handling, no duplicate footers, CSV help,
+read-only AI request construction, access checks, ZIP name collisions and Python
+compilation. No production deployment was performed or visually tested here.

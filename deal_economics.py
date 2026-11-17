@@ -660,10 +660,18 @@ def run_economics_app():
     if len(set(selections))!=len(selections): st.error('Select distinct components.');st.stop()
     st.subheader('Customer pricing structure')
     def reset_offer_structure():
+        previous=st.session_state.get('_offer_active_mode')
+        bank=st.session_state.setdefault('wk_structure_quotes',{})
+        if previous:
+            saved=bank.setdefault(previous,{})
+            saved['widgets']={k:v for k,v in st.session_state.items() if k.startswith(('offer_mode_','offer_override_')) or k in ('wk_custom_override','wk_custom_price','wk_customer_adder')}
         for key in list(st.session_state):
-            if key.startswith(('offer_mode_','offer_override_')) or key in ('wk_custom_override','wk_custom_price'):
+            if key.startswith(('offer_mode_','offer_override_')) or key in ('wk_custom_override','wk_custom_price','wk_customer_adder'):
                 st.session_state.pop(key,None)
+        for key,value in bank.get(st.session_state['wk_pricing_mode'],{}).get('widgets',{}).items():
+            st.session_state[key]=value
     pricing_mode=st.radio('Contract pricing',list(MODES),horizontal=True,key='wk_pricing_mode',on_change=reset_offer_structure)
+    st.session_state['_offer_active_mode']=pricing_mode
     is_indexed=pricing_mode in INDEXED_MODES
     is_nymex=pricing_mode=='NYMEX + adder'
     customer_adder=st.number_input('Customer adder above Henry Hub NYMEX H ($/MMBtu)' if is_nymex else 'Customer adder above monthly index ($/MMBtu)',value=.38,step=.01,format='%.4f',key='wk_customer_adder') if is_indexed else .38
@@ -815,6 +823,10 @@ def run_economics_app():
                 st.session_state['wk_client_index_schedule']=[dict(month=str(pd.Timestamp(row['month']).date()),index=(float(row['Existing projected index $/MMBtu']) if pd.notna(row['Existing projected index $/MMBtu']) else None)) for row in index_edit.to_dict('records')]
         client_notes=st.text_input('Client-facing offer note (optional)',value='',max_chars=240,key='wk_client_notes')
     
+    selected_structures=st.multiselect('Price proposals to include in internal review',list(MODES),default=list(MODES),key='wk_proposal_structures')
+    st.caption('Each structure retains its own manual offers. Save current workstream to retain all structures and this selection. Unedited structures are identified as model targets in the review.')
+    bank=st.session_state.setdefault('wk_structure_quotes',{})
+    bank[pricing_mode]=dict(widgets={k:v for k,v in st.session_state.items() if k.startswith(('offer_mode_','offer_override_')) or k in ('wk_custom_override','wk_custom_price','wk_customer_adder')},options=dict(deal_options))
     import json
     widget_snapshot={}
     for k,v in st.session_state.items():
@@ -917,11 +929,11 @@ def run_economics_app():
             from client_term_proposal import schedules as opportunity_term_schedules
             internal_terms=opportunity_term_schedules(standard_offers,
                 (prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery),
-                pricing_mode,offers,deal_options,internal=True,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+                pricing_mode,offers,deal_options,internal=True,saved_quotes=bank,selected_modes=selected_structures,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
             internal_term_export=pd.DataFrame([dict(pricing_structure=structure,**row) for structure,worksheet in internal_terms.items() for row in worksheet['rows']])
             st.download_button('Download internal fixed, regional index and NYMEX term worksheets (CSV)',internal_term_export.to_csv(index=False).encode(),'Internal_Opportunity_Terms.csv','text/csv')
             pdf_bytes=build_summary_pdf(dict(internal_term_worksheets=internal_terms,client_index_name=client_index_name,regional_index_name=regional_index_name,**deal_options,customer_offer_rate=float(result.offer_rate.iloc[0]),credit_mode=credit_mode,ft_credit=credit_parts['ft_credit'],supply_credit=credit_parts['supply_credit'],customer=customer,utility=utility,client_location=client_location,facility_type=facility_type,broker_name=broker_name or 'Not specified',due_date=str(offer_due) if offer_due else 'Not specified',start=str(start_entered),term=term,asof=str(pd.Timestamp(asof).date()),discount=discount,break_even=target-margin,transport=transport,broker=broker,margin=margin,fuel=fuel,capital_hurdle=capital_hurdle,days=financing_days,investment=investment,recovery=recovery,source='input/'+str(selected_path.relative_to(INPUT_DIR)),components=' + '.join(' | '.join(x) for x in selections)),summary,result,scenario_rows)
-            st.download_button('Download internal opportunity package - four pages (PDF)',pdf_bytes,'Riverbend_Internal_Opportunity.pdf','application/pdf')
+            st.download_button('Download internal opportunity package (PDF)',pdf_bytes,'Riverbend_Internal_Opportunity.pdf','application/pdf')
         except ImportError:
             st.warning('PDF export requires reportlab in requirements.txt. CSV downloads remain available.')
     
@@ -953,9 +965,9 @@ def run_economics_app():
                 from client_term_proposal import schedules as client_term_schedules
                 proposal_terms=client_term_schedules(standard_offers,
                     (prices,asof,selections,start,usage,defaults['usage'],transport,broker,margin,fuel,capital_hurdle,financing_days,discount,investment,recovery),
-                    pricing_mode,offers,deal_options,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
+                    pricing_mode,offers,deal_options,saved_quotes=bank,automatic_credit=automatic_credit,full_credit_recovery=full_recovery)
                 client_meta.update(term_worksheets=proposal_terms,client_index_name=client_index_name,regional_index_name=regional_index_name)
-                st.caption('The four-page proposal retains the selected offer on page 1. Pages 2, 3 and 4 show 12, 18, 24, 36 and 48 months. The active pricing structure uses its reviewed term offers; the alternative structures use model targets under the same assumptions. Transportation follows the current pass-through setting on all pages.')
+                st.caption('The proposal retains the active offer on page 1. Term worksheets use each structure’s retained offer settings; unedited structures are identified as model targets. Review the pricing basis on each page before distribution.')
                 with st.expander('Review fixed, regional index and NYMEX offers for client distribution'):
                     for structure,worksheet in proposal_terms.items():
                         st.write(structure+' — '+worksheet['basis'])
@@ -1012,4 +1024,3 @@ if __name__ == '__main__':
     else:
         from app_workflow_help import finish
         finish(st)
-

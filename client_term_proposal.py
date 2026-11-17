@@ -6,19 +6,28 @@ from nymex_reference import MODES,INDEXED_MODES
 TERMS=(12,18,24,36,48)
 
 
-def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,**credit_options):
-    """Retain reviewed quotes for active structure; other structure uses model targets."""
+def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,saved_quotes=None,selected_modes=None,**credit_options):
+    """Reprice retained per-structure elections; mark untouched structures as model targets."""
     out={}
     for mode in MODES:
+        if selected_modes is not None and mode not in selected_modes:continue
         if mode==active_mode:
+            options=dict(deal_options)
             frame=active_offers.copy()
             basis='Uses the reviewed standard-term offers in the app.'
         else:
-            options=dict(deal_options,pricing_mode=mode)
+            saved=(saved_quotes or {}).get(mode,{})
+            options=dict(saved.get('options',deal_options),pricing_mode=mode)
             frame=offer_fn(*common,**credit_options,**options)
             targets={int(r.term_months):float(r.target_price) for r in frame.itertuples() if r.status=='Available'}
+            widgets=saved.get('widgets',{})
+            for term in list(targets):
+                setting=widgets.get(f'offer_mode_{term}','Model target')
+                if setting=='Manual price':targets[term]=widgets.get(f'offer_override_{term}')
+                elif setting=='Entered adder':targets[term]=widgets.get('wk_customer_adder',options.get('customer_adder'))
+                elif setting.startswith('Target less'):targets[term]-=.1 if setting=='Target less $0.10' else .2
             frame=offer_fn(*common,overrides=targets,**credit_options,**options)
-            basis='Alternative pricing structure calculated at the shared target margin.'
+            basis='Uses retained offer settings for this pricing structure.' if saved else 'Model target — no reviewed offer retained for this structure.'
         if frame.term_months.duplicated().any():raise ValueError('Duplicate proposal terms.')
         safe=[]
         for term in TERMS:
@@ -31,7 +40,7 @@ def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=Fa
             if internal:
                 fields.update({k:(float(row[k]) if pd.notna(row.get(k)) else None) for k in ['break_even','spread','gross_margin','annual_revenue','contract_profit','npv','upfront_credit','ft_credit','supply_credit','credit_recovery']})
             safe.append(dict(fields,status='Available' if valid else 'Unavailable - incomplete pricing'))
-        out[mode]=dict(rows=safe,basis=basis)
+        out[mode]=dict(rows=safe,basis=basis,transport_pass_through=options.get('transport_pass_through',False))
     return out
 
 
@@ -79,4 +88,3 @@ def pages(meta,styles,logo_bytes):
         note+=' Exact entered usage is used where available; longer terms repeat calendar-month usage assumptions. Utility distribution charges, taxes and other fees are excluded unless expressly included. Unavailable terms require complete pricing before quoting.'
         out.extend([p('Offer basis','bold'),Spacer(1,5),p(note,'small'),Spacer(1,12),p(f"Pricing as of {meta['asof']} | Offer due: {meta.get('due_date') or 'Not specified'}",'small'),p('Subject to final agreement and credit approval.','small')])
     return out
-

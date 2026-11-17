@@ -143,6 +143,27 @@ with patch.object(econ,'ROOT',Path({folder!r})),patch('app_workflow_help.begin')
             app.session_state['_pending_workstream']=legacy
             app.run()
             self.assertTrue(app.checkbox(key='wk_transport_pass_through').value)
+            app.radio(key='wk_pricing_mode').set_value('Fixed price').run()
+            app.selectbox(key='offer_mode_12').set_value('Manual price').run()
+            app.number_input(key='offer_override_12').set_value(6.1234).run()
+            app.radio(key='wk_pricing_mode').set_value('Index + adder').run()
+            app.selectbox(key='offer_mode_12').set_value('Manual price').run()
+            app.number_input(key='offer_override_12').set_value(.4567).run()
+            app.radio(key='wk_pricing_mode').set_value('Fixed price').run()
+            self.assertFalse(app.exception)
+            self.assertEqual(app.number_input(key='offer_override_12').value,6.1234)
+            app.multiselect(key='wk_proposal_structures').set_value(['Fixed price','Index + adder']).run()
+            next(x for x in app.button if x.label=='Save current workstream').click().run()
+            retained=app.session_state['_test_saved']
+            app.session_state['_pending_workstream']=retained
+            app.run()
+            self.assertFalse(app.exception)
+            internal=PdfReader(BytesIO(app.session_state['_test_internal_pdf']))
+            self.assertEqual(len(internal.pages),3)
+            self.assertIn('6.1234',internal.pages[1].extract_text())
+            self.assertIn('0.4567',internal.pages[2].extract_text())
+            app.radio(key='wk_pricing_mode').set_value('Index + adder').run()
+            self.assertEqual(app.number_input(key='offer_override_12').value,.4567)
 
 
 if __name__=='__main__':unittest.main()

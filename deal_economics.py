@@ -432,6 +432,13 @@ def get_logo_bytes():
 ROOT=Path(__file__).resolve().parent
 def run_economics_app():
     st.set_page_config(page_title='REM | Deal Economics',layout='wide',initial_sidebar_state='expanded')
+    # Streamlit reruns the entry point while imported modules may retain the
+    # previous deployment's call signatures and PDF structure handling.
+    import importlib
+    import client_term_proposal
+    import internal_opportunity_proposal
+    importlib.reload(client_term_proposal)
+    importlib.reload(internal_opportunity_proposal)
     from app_workflow_help import begin as begin_workflow_help
     begin_workflow_help(st,'Texas economics')
     st.markdown("""<style>

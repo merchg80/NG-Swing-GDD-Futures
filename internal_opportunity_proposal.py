@@ -52,10 +52,11 @@ def build(meta,summary,result,scenarios,logo_bytes):
         val=next((v for k,v in r.items() if k.startswith('NPV @')),None)
         scenario_table.append([p(v,'small') for v in [r['Scenario'],rate(r['Offer $/MMBtu']),rate(r['Spread $/MMBtu']),money(r['Annualized GP $']),money(r['Contract GP $']),money(val)]])
     story += [table(scenario_table,[116,82,76,88,90,88],True,6),Spacer(1,12),p('Shared pricing and credit assumptions','bold'),Spacer(1,5)]
-    assumptions=[['Transport',rate(meta['transport']),'Brokerage',rate(meta['broker'])],['Target spread',rate(meta['margin']),'Supply fuel',percent(meta['fuel'])],['Capital hurdle',percent(meta['capital_hurdle']),'Financing days',f"{meta['days']:g}"],['Annual NPV discount',percent(meta['discount']),'Credit sizing',meta.get('credit_mode','Manual')],['Transportation recovery','Full pass-through' if meta.get('transport_pass_through') else 'Included in quote','Supplier premium',rate(meta.get('supplier_premium',0))]]
+    assumptions=[['Transport',rate(meta['transport']),'Brokerage',rate(meta['broker'])],['Target spread',rate(meta['margin']),'Supply fuel',percent(meta['fuel'])],['Capital hurdle',percent(meta['capital_hurdle']),'Financing days',f"{meta['days']:g}"],['Annual NPV discount',percent(meta['discount']),'Credit sizing',meta.get('credit_mode','Manual')],['Transportation recovery','Full pass-through' if data.get('transport_pass_through',meta.get('transport_pass_through')) else 'Included in quote','Supplier premium',rate(meta.get('supplier_premium',0))]]
     story += [table([[p(v,'small') for v in r] for r in assumptions],[150,120,150,120],pad=5),Spacer(1,10),p('Sources: '+meta['source'],'small'),p('Market components: '+meta['components'],'small'),Spacer(1,5),p('Profit is after modeled supply, transportation, brokerage and capital charges; overhead and taxes are excluded. NPV uses monthly cash flows, upfront credit and final recovery. Index revenue and profit remain projections.','small')]
     metrics=[('Quoted fixed rate','offer_price',rate),('Projected all-in rate','projected_all_in_price',rate),('Break-even rate / adder','break_even',rate),('Spread after capital','spread',rate),('Gross margin after capital','gross_margin',percent),('Contract usage (MMBtu)','contract_volume',lambda v:f'{v:,.0f}' if pd.notna(v) else 'Unavailable'),('Annualized revenue','annual_revenue',money),('Annualized profit','annualized_profit',money),('Contract profit','contract_profit',money),(f"NPV @ {meta['discount']:.2%}",'npv',money),('Upfront credit posted','upfront_credit',money),('FT credit component','ft_credit',money),('Supply credit component','supply_credit',money),('Terminal credit recovery','credit_recovery',money)]
     for mode,title in [('Fixed price','Fixed-price opportunity terms'),('Index + adder','Regional index-adder opportunity terms'),('NYMEX + adder','NYMEX-adder opportunity terms')]:
+        if mode not in meta['internal_term_worksheets']:continue
         data=meta['internal_term_worksheets'][mode];rows=data['rows']
         story += [PageBreak()]+brand(title)+[identity(),Spacer(1,8),p('Pricing as of '+meta['asof']+' | Delivery starts '+meta['start']),Spacer(1,4),p(data['basis'],'small'),Spacer(1,12)]
         if mode in INDEXED_MODES:
@@ -83,4 +84,3 @@ def build(meta,summary,result,scenarios,logo_bytes):
     doc.addPageTemplates(PageTemplate(id='InternalOpportunity',frames=[Frame(36,52,540,710,leftPadding=0,rightPadding=0,topPadding=0,bottomPadding=0)],onPage=footer))
     doc.build(story)
     return out.getvalue()
-

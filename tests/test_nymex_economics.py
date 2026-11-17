@@ -92,6 +92,14 @@ from pathlib import Path
 from unittest.mock import patch
 import deal_economics as econ
 import streamlit as st
+import client_term_proposal
+if '_test_stale_helper' not in st.session_state:
+    # Simulate an imported pre-deployment helper accepting the new arguments
+    # in **credit_options and forwarding them to the pricing calculation.
+    def legacy_schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,**credit_options):
+        return offer_fn(*common,**credit_options,**deal_options)
+    client_term_proposal.schedules=legacy_schedules
+    st.session_state['_test_stale_helper']=True
 def saved(repo,token,name,snapshot,*args):
     st.session_state['_test_saved']=snapshot
     return 'workstreams/test.json','synthetic-sha',dict(snapshot,name=name,saved_at='test')

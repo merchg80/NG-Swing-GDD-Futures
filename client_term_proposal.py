@@ -1,23 +1,33 @@
 """Customer-facing Texas fixed/index term worksheets. Internal returns stay private."""
 import math
 import pandas as pd
+from nymex_reference import MODES,INDEXED_MODES
 
 TERMS=(12,18,24,36,48)
 
 
-def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,**credit_options):
-    """Retain reviewed quotes for active structure; other structure uses model targets."""
+def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=False,saved_quotes=None,selected_modes=None,**credit_options):
+    """Reprice retained per-structure elections; mark untouched structures as model targets."""
     out={}
-    for mode in ('Fixed price','Index + adder'):
+    for mode in MODES:
+        if selected_modes is not None and mode not in selected_modes:continue
         if mode==active_mode:
+            options=dict(deal_options)
             frame=active_offers.copy()
             basis='Uses the reviewed standard-term offers in the app.'
         else:
-            options=dict(deal_options,pricing_mode=mode)
+            saved=(saved_quotes or {}).get(mode,{})
+            options=dict(saved.get('options',deal_options),pricing_mode=mode)
             frame=offer_fn(*common,**credit_options,**options)
             targets={int(r.term_months):float(r.target_price) for r in frame.itertuples() if r.status=='Available'}
+            widgets=saved.get('widgets',{})
+            for term in list(targets):
+                setting=widgets.get(f'offer_mode_{term}','Model target')
+                if setting=='Manual price':targets[term]=widgets.get(f'offer_override_{term}')
+                elif setting=='Entered adder':targets[term]=widgets.get('wk_customer_adder',options.get('customer_adder'))
+                elif setting.startswith('Target less'):targets[term]-=.1 if setting=='Target less $0.10' else .2
             frame=offer_fn(*common,overrides=targets,**credit_options,**options)
-            basis='Alternative pricing structure calculated at the shared target margin.'
+            basis='Uses retained offer settings for this pricing structure.' if saved else 'Model target — no reviewed offer retained for this structure.'
         if frame.term_months.duplicated().any():raise ValueError('Duplicate proposal terms.')
         safe=[]
         for term in TERMS:
@@ -30,12 +40,12 @@ def schedules(offer_fn,common,active_mode,active_offers,deal_options,internal=Fa
             if internal:
                 fields.update({k:(float(row[k]) if pd.notna(row.get(k)) else None) for k in ['break_even','spread','gross_margin','annual_revenue','contract_profit','npv','upfront_credit','ft_credit','supply_credit','credit_recovery']})
             safe.append(dict(fields,status='Available' if valid else 'Unavailable - incomplete pricing'))
-        out[mode]=dict(rows=safe,basis=basis)
+        out[mode]=dict(rows=safe,basis=basis,transport_pass_through=options.get('transport_pass_through',False))
     return out
 
 
 def pages(meta,styles,logo_bytes):
-    """Return two explicitly separated portrait worksheets using summary typography."""
+    """Return fixed, regional-index and NYMEX worksheets using summary typography."""
     from io import BytesIO
     from xml.sax.saxutils import escape
     from reportlab.lib import colors
@@ -50,7 +60,7 @@ def pages(meta,styles,logo_bytes):
         else:cmds += [('BACKGROUND',(0,0),(-1,-1),pale)]
         t.setStyle(TableStyle(cmds));return t
     out=[]
-    for mode,title in [('Fixed price','Fixed-price options'),('Index + adder','Index-adder options')]:
+    for mode,title in [('Fixed price','Fixed-price options'),('Index + adder','Regional index-adder options'),('NYMEX + adder','NYMEX-adder options')]:
         data=meta['term_worksheets'][mode]
         out.append(PageBreak())
         logo=Image(BytesIO(logo_bytes),width=250,height=250*402/2096);logo.hAlign='CENTER'
@@ -58,10 +68,11 @@ def pages(meta,styles,logo_bytes):
         customer=p(meta['customer'],'centerbold')
         info=p((meta.get('utility') or 'Utility not specified')+'\n'+(meta.get('client_location') or 'Location not specified'))
         out.extend([table([[customer,info]],[270,270]),Spacer(1,15)])
-        indexed=mode=='Index + adder'
+        indexed=mode in INDEXED_MODES
         if indexed:
-            out.extend([p('Monthly index: '+meta.get('client_index_name','Selected monthly index'),'centerbold'),Spacer(1,7)])
-        headers=['TERM','DELIVERY PERIOD','INDEX ADDER\n$/MMBtu' if indexed else 'FIXED RATE\n$/MMBtu','PROJECTED ALL-IN\n$/MMBtu' if indexed else 'DELIVERED RATE\n$/MMBtu','CONTRACT USAGE\nMMBtu']
+            name='Henry Hub NYMEX (H)' if mode=='NYMEX + adder' else meta.get('regional_index_name',meta.get('client_index_name','Selected monthly index'))
+            out.extend([p('Monthly index: '+name,'centerbold'),Spacer(1,7)])
+        headers=['TERM','DELIVERY PERIOD','NYMEX ADDER\n$/MMBtu' if mode=='NYMEX + adder' else 'INDEX ADDER\n$/MMBtu' if indexed else 'FIXED RATE\n$/MMBtu','PROJECTED ALL-IN\n$/MMBtu' if indexed else 'DELIVERED RATE\n$/MMBtu','CONTRACT USAGE\nMMBtu']
         rows=[[p(h,'white') for h in headers]]
         for r in data['rows']:
             months=int(r['term_months']);start=pd.Timestamp(meta['start']);end=(start.to_period('M')+months-1).end_time

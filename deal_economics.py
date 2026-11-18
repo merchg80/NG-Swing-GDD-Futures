@@ -1,3 +1,4 @@
+import hashlib
 import os
 from pathlib import Path
 import pandas as pd
@@ -576,6 +577,14 @@ def run_economics_app():
     input_candidates=[ROOT/'input',ROOT.parent/'input']
     INPUT_DIR=next((d for d in input_candidates if d.is_dir()),ROOT/'input')
     defaults=dict(customer='New customer', start=str(pd.Timestamp.today().to_period('M').to_timestamp().date()), transport=.35, broker=.30, margin=.18, usage={m:1700. for m in range(1,13)})
+    from source_refresh import read_source, record, show_status
+    scope='deal_economics'
+    refresh_all=st.button('Refresh all sources',key='wk_master_refresh',type='primary')
+    refresh_status=st.container()
+    if refresh_all:
+        st.session_state['_deal_economics_source_status']={}
+        record(st.session_state,scope,'Customer usage','Manual input',detail='Uses the entered or saved customer usage schedule.')
+        load_location.clear()
     prices=None
     with st.expander('1. Select ICE pricing file and contract dates', expanded=True):
         st.caption('Pricing source: merchg80/NG-Swing-GDD-Futures • main branch • input folder')
@@ -621,16 +630,26 @@ def run_economics_app():
             st.session_state['loaded_pricing_stamp']=stamp
             st.session_state.pop('wk_asof',None)
             st.session_state['_saved_trade_date']=None
-        if st.session_state.get('loaded_pricing_stamp')!=stamp:
+        snapshot=st.session_state.get('_deal_economics_source_snapshots',{}).get('Selected ICE pricing')
+        status=st.session_state.get('_deal_economics_source_status',{}).get('Selected ICE pricing',{})
+        keep_last=bool(snapshot and snapshot['identity']==str(selected_path) and status.get('Status')=='Failed')
+        if st.session_state.get('loaded_pricing_stamp')!=stamp and not (refresh_all or keep_last):
             st.info('Choose an existing ICE file above, then click Load / refresh selected pricing file. No upload is needed.')
             st.stop()
         try:
             with st.spinner(f'Reading {selected_path.name} — large ICE files may take time…'):
-                prices=load_location(str(selected_path),selected_path.stat().st_mtime_ns)
+                prices=read_source(st.session_state,scope,'Selected ICE pricing',str(selected_path),
+                                   lambda:load_location(str(selected_path),selected_path.stat().st_mtime_ns),
+                                   lambda frame:hashlib.sha256(pd.util.hash_pandas_object(frame,index=True).values.tobytes()).hexdigest(),
+                                   refreshing=refresh_all)
+            if refresh_all and st.session_state['_deal_economics_source_status']['Selected ICE pricing']['Status'] != 'Failed':
+                st.session_state['loaded_pricing_stamp']=stamp
+            show_status(refresh_status,st.session_state,scope)
             st.success(f'Loaded {len(prices):,} settlement rows • latest trade date {prices.trade_date.max():%Y-%m-%d}')
             declared=file_date(selected_path)
             if declared and prices.trade_date.max().date()!=declared:st.warning('The file name date does not match its latest settlement trade date. Review this source before quoting.')
         except Exception as e:
+            show_status(refresh_status,st.session_state,scope)
             st.error(f'Could not read input/{selected_path.relative_to(INPUT_DIR)}: {e}')
             st.caption('Select an ICE settlement file with trade date, hub, product, strip, contract and settlement price columns. A daily Date-by-hub master is not a monthly forward curve.')
             st.stop()

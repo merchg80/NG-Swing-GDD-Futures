@@ -1,3 +1,4 @@
+import hashlib
 import os,json,copy
 from pathlib import Path
 import pandas as pd
@@ -623,9 +624,34 @@ def run_economics_app():
         st.rerun()
     file=st.selectbox('ICE Cleared Gas file',files,key='oh_pricing_file',on_change=choose_file)
     path=inputs_dir/file
+    from source_refresh import read_source, show_status
+    scope='ohio_economics'
+    refresh_all=st.button('Refresh all sources',key='oh_master_refresh',type='primary')
+    refresh_status=st.container()
+    refreshed_market={}
+    if refresh_all:
+        st.session_state['_ohio_economics_source_status']={}
+        load_prices.clear()
+        load_market.clear()
+        st.session_state[f'_oh_market_revision_{uid}']=st.session_state.get(f'_oh_market_revision_{uid}',0)+1
+        for customer_class in ('Residential','Small Commercial'):
+            try:
+                refreshed_market[customer_class]=read_source(
+                    st.session_state,scope,'PUCO '+customer_class,utility,
+                    lambda:load_market(utility,customer_class,False),
+                    lambda item:repr((item['rows'],item['mercury_rows'],item['unit'])),
+                    refreshing=True)
+            except Exception:
+                pass
     with st.spinner('Reading selected pricing file…'):
-        try:prices=load_prices(str(path),path.stat().st_mtime_ns)
-        except Exception as e:st.error(str(e));st.stop()
+        try:
+            prices=read_source(st.session_state,scope,'Selected ICE pricing',str(path),
+                               lambda:load_prices(str(path),path.stat().st_mtime_ns),
+                               lambda frame:hashlib.sha256(pd.util.hash_pandas_object(frame,index=True).values.tobytes()).hexdigest(),
+                               refreshing=refresh_all)
+        except Exception as e:
+            show_status(refresh_status,st.session_state,scope)
+            st.error(str(e));st.stop()
     dates=sorted(prices.trade_date.unique(),reverse=True)
     if st.session_state.get('oh_asof') not in dates:st.session_state.pop('oh_asof',None)
     a,b,c=st.columns(3)
@@ -646,8 +672,15 @@ def run_economics_app():
         a,b=st.columns(2)
         design_temperature=a.number_input('East design-day temperature (°F)',value=-13.,key=f'oh_{uid}_design_temp')
         opex_hurdle=b.number_input('OPEX hurdle ($/sold Mcf)',min_value=0.,value=2. if uid=='cgo' else .65,step=.05,key=f'oh_{uid}_opex_hurdle')
-        try:campaign_profiles,campaign_meta=acquisition_campaign(months,utility,customers,east_share,residential,design_temperature,storage_multiplier)
-        except ValueError as e:st.error(str(e));st.stop()
+        try:
+            campaign_profiles,campaign_meta=read_source(
+                st.session_state,scope,'Campaign weather normals',
+                (tuple(months),utility,customers,east_share,residential,design_temperature,storage_multiplier),
+                lambda:acquisition_campaign(months,utility,customers,east_share,residential,design_temperature,storage_multiplier),
+                lambda item:hashlib.sha256(repr(CAMPAIGN_DATA['daily']).encode()).hexdigest(),refreshing=refresh_all)
+        except ValueError as e:
+            show_status(refresh_status,st.session_state,scope)
+            st.error(str(e));st.stop()
         st.caption('2016–2025 ERA5 coordinate-based normals; America/New_York days. DEO uses monthly base + daily HDD factors. Columbia evaluates its monthly temperature quadratic on each normal-temperature day. No weekday multipliers. Customer mix is constant throughout the term; fractional counts represent expected acquisition mix.')
         st.caption('Storage requirement = East January design-day demand × 0.34 × 51.9 × 0.90  (Mcf). Columbia uses the East proxy with Columbia campaign counts. Storage injects April–October and withdraws November–March using the utility economics-tab profile. DEO West has no storage. OPEX is charged once on sold volume, separately from additional monthly overhead.')
         mix=[]
@@ -658,6 +691,7 @@ def run_economics_app():
             for route,profile in campaign_profiles.items():
                 st.write(route);st.dataframe(profile,hide_index=True)
                 st.download_button('Download '+route+' campaign CSV',profile.to_csv(index=False),file_name='campaign_'+route.split(' ')[0]+'.csv',key=f'oh_download_{uid}_{route}_campaign_csv')
+    show_status(refresh_status,st.session_state,scope)
     manual_customer_count=None
     if not campaign_active:manual_customer_count=st.number_input('Utility customer count for per-customer economics',min_value=1,value=500,step=50,key=f'oh_{uid}_manual_customers')
     summary_box=st.container()
@@ -815,7 +849,10 @@ def run_economics_app():
             if not show_market and not customer_class==default_class:continue
             try:
                 with st.spinner('Reading '+customer_class+' competitor listings...'):
-                    market_data[customer_class]=load_market(utility,customer_class,False)
+                    market_data[customer_class]=refreshed_market.get(customer_class) or read_source(
+                        st.session_state,scope,'PUCO '+customer_class,utility,
+                        lambda:load_market(utility,customer_class,False),
+                        lambda item:repr((item['rows'],item['mercury_rows'],item['unit'])))
             except Exception as e:market_errors[customer_class]=str(e)
         default_source=market_data.get(default_class)
         if default_source:

@@ -409,6 +409,7 @@ section = st.sidebar.radio(
     options=[
         "ICE settlements",
         "NG Swing GDD master output",
+        "Gas Daily master + ICE futures",
     ],
 )
 
@@ -426,7 +427,8 @@ st.sidebar.caption(
 # MASTER OUTPUT
 # =================================================
 
-if section == "NG Swing GDD master output":
+compare_sources = section == "Gas Daily master + ICE futures"
+if section == "NG Swing GDD master output" or compare_sources:
     paths = sorted(
         (ROOT / "master").rglob("*.csv")
     )
@@ -465,12 +467,6 @@ if section == "NG Swing GDD master output":
         "values or identify historical run dates."
     )
 
-    start, end = date_controls(
-        data.index.min(),
-        data.index.max(),
-        "master_dates",
-    )
-
     defaults = [
         hub
         for hub in ["HSC", "Henry", "Waha", "TETCO-M3"]
@@ -487,28 +483,37 @@ if section == "NG Swing GDD master output":
         st.info("Select at least one hub.")
         st.stop()
 
-    selected = data.loc[
-        (data.index >= pd.Timestamp(start))
-        & (data.index <= pd.Timestamp(end)),
-        hubs,
-    ]
+    if compare_sources:
+        master_data = data
+    else:
+        start, end = date_controls(
+            data.index.min(),
+            data.index.max(),
+            "master_dates",
+        )
 
-    st.caption(
-        "Each selected hub retains its own average."
-    )
+        selected = data.loc[
+            (data.index >= pd.Timestamp(start))
+            & (data.index <= pd.Timestamp(end)),
+            hubs,
+        ]
 
-    show_report(
-        selected,
-        key="master",
-        metric_label="Master output value",
-    )
+        st.caption(
+            "Each selected hub retains its own average."
+        )
+
+        show_report(
+            selected,
+            key="master",
+            metric_label="Master output value",
+        )
 
 
 # =================================================
 # ICE SETTLEMENTS
 # =================================================
 
-else:
+if section != "NG Swing GDD master output":
     catalog_path = ARCHIVE / "catalog.parquet"
     manifest_path = ARCHIVE / "manifest.json"
 
@@ -657,7 +662,7 @@ else:
 
     metric_label = st.sidebar.selectbox(
         "Price field",
-        ["Settlement price", "Net change"],
+        ["Settlement price"] if compare_sources else ["Settlement price", "Net change"],
     )
 
     metric = (
@@ -842,13 +847,32 @@ else:
         "are kept separate."
     )
 
-    show_report(
-        wide,
-        key="ice_report_" + str(family_position),
-        metric_label=metric_label,
-        strip_average=True,
-        expected_columns=expected_columns,
-    )
+    if compare_sources:
+        master_prices = master_data.loc[str(trade_start):str(trade_end), hubs].add_prefix("Master · ")
+        strip_columns = st.multiselect(
+            "Futures delivery strips to plot",
+            expected_columns,
+            default=expected_columns[:1],
+            key="comparison_strips_" + str(family_position) + "_" + str(expected_columns[0]),
+        )
+        if not strip_columns:
+            st.info("Select a futures delivery strip for the comparison.")
+            st.stop()
+        futures = wide.reindex(columns=strip_columns).add_prefix(
+            f"ICE · {family_row['product']} · {family_row['hub']} · "
+        )
+        st.caption("Calendar date shows the master delivery date and the ICE trade date. "
+                   "Each futures line follows one delivery strip. Gaps indicate missing prices.")
+        show_report(pd.concat([master_prices, futures], axis=1).sort_index(),
+                    key="master_ice_comparison", metric_label="Price")
+    else:
+        show_report(
+            wide,
+            key="ice_report_" + str(family_position),
+            metric_label=metric_label,
+            strip_average=True,
+            expected_columns=expected_columns,
+        )
 
     with st.expander(
         "Underlying records and source files"
